@@ -140,6 +140,16 @@ def stage_run_dir(run_id, source_dir=SOURCE_DIR, repo_root=None):
         shutil.rmtree(run_dir, ignore_errors=True)
 
     shutil.copytree(src, dst)
+    # bigloop1-fix: staged inputs must never carry another run's outputs.
+    # The sweep sandbox accumulates {n}actual_/{n}predict_/{n}UOinfor_ files
+    # via collect_results, so a late-staging Run would otherwise inherit them.
+    for _stale in os.listdir(dst):
+        if _stale and _stale[0].isdigit() and (
+            "actual_" in _stale or "predict_" in _stale or "UOinfor_" in _stale
+        ):
+            _stale_path = os.path.join(dst, _stale)
+            if os.path.isfile(_stale_path):
+                os.remove(_stale_path)
     return run_dir
 
 
@@ -691,6 +701,14 @@ def run_parallel_msa_ue(schedule, ue_routes_path, max_workers=None,
             "UE-guidance MSA sweep partially completed: %d succeeded, %d "
             "failed (bigloops=%s). Failed sandboxes kept." % (
                 len(all_ok), len(all_failed), sorted(all_failed)))
+    if all_failed:
+        # bigloop1-fix: failures must be visible in a file, not just console.
+        try:
+            with open(os.path.join(repo_root, "sweep_failures.txt"), "w") as _ff:
+                for _bl in sorted(all_failed):
+                    print("bigloop %s: %s" % (_bl, all_failed[_bl]), file=_ff)
+        except Exception:
+            pass
     return SweepResults([all_ok[bl] for bl in sorted(all_ok)],
                         failures=all_failed)
 

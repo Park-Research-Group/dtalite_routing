@@ -1035,11 +1035,18 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
 
 
 
-            inputagent[j][11] = ue_route[jj]
-            _nd = [x.strip() for x in str(ue_route[jj]).split(';') if x.strip()]
-            if len(_nd) >= 2:
-                inputagent[j][4] = _nd[0]
-                inputagent[j][5] = _nd[-1]
+            _norm, _norm_nodes = normalize_route_path(ue_route[jj])
+            if _norm is not None:
+                inputagent[j][11] = _norm
+                inputagent[j][4] = _norm_nodes[0]
+                inputagent[j][5] = _norm_nodes[-1]
+            else:
+                print(f"  [ue-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
+                      f"UE route invalid ({ue_route[jj]!r}), keeping prior path", flush=True)
+                if normalize_route_path(inputagent[j][11])[0] is None:
+                    raise RuntimeError(
+                        f"bigloop={bigloop} phase=ue-route agent={inputagent[j][0]}: "
+                        f"UE route invalid and no prior path to fall back to")
 
 
 
@@ -1229,19 +1236,34 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
 
                 )
 
-            inputagent[j][11] = ue_route[jj]
-            _nd = [x.strip() for x in str(ue_route[jj]).split(';') if x.strip()]
-            if len(_nd) >= 2:
-                inputagent[j][4] = _nd[0]
-                inputagent[j][5] = _nd[-1]
+            _norm, _norm_nodes = normalize_route_path(ue_route[jj])
+            if _norm is not None:
+                inputagent[j][11] = _norm
+                inputagent[j][4] = _norm_nodes[0]
+                inputagent[j][5] = _norm_nodes[-1]
+            else:
+                print(f"  [ue-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
+                      f"UE route invalid ({ue_route[jj]!r}), keeping prior path", flush=True)
+                if normalize_route_path(inputagent[j][11])[0] is None:
+                    raise RuntimeError(
+                        f"bigloop={bigloop} phase=ue-route agent={inputagent[j][0]}: "
+                        f"UE route invalid and no prior path to fall back to")
 
         else:
 
-            inputagent[j][11] = choiceset[
-
+            _p_ue = choiceset[
                 int(pre_choice[j]), int(pre_rposition[j])
-
             ]
+            _norm, _norm_nodes = normalize_route_path(_p_ue)
+            if _norm is not None:
+                inputagent[j][11] = _norm
+            else:
+                print(f"  [predict-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
+                      f"predicted route invalid ({_p_ue!r}), keeping prior path", flush=True)
+                if normalize_route_path(inputagent[j][11])[0] is None:
+                    raise RuntimeError(
+                        f"bigloop={bigloop} phase=predict agent={inputagent[j][0]}: "
+                        f"predicted route invalid and no prior path to fall back to")
 
 
 
@@ -1359,9 +1381,19 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
 
 
 
-        inputagent[_row][11] = choiceset[
+        _p_ue = choiceset[
             int(com_choice[_k]), int(com_rposition[_k])
         ]
+        _norm, _norm_nodes = normalize_route_path(_p_ue)
+        if _norm is not None:
+            inputagent[_row][11] = _norm
+        else:
+            print(f"  [actual-validate] bigloop={bigloop} agent={inputagent[_row][0]}: "
+                  f"predicted route invalid ({_p_ue!r}), keeping prior path", flush=True)
+            if normalize_route_path(inputagent[_row][11])[0] is None:
+                raise RuntimeError(
+                    f"bigloop={bigloop} phase=actual agent={inputagent[_row][0]}: "
+                    f"predicted route invalid and no prior path to fall back to")
 
 
 

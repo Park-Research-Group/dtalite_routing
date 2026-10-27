@@ -1105,12 +1105,18 @@ def msa(bigloop, p, p_fix, p_realtime, seed=1, network='siouxfalls',
         _p = choiceset[
             int(pre_choice[j]), int(pre_rposition[j])
         ]
-        if _p is not None:
-            inputagent[j][11] = _p
-            _nodes = [x.strip() for x in str(_p).split(';') if x.strip()]
-            if len(_nodes) >= 2:
-                inputagent[j][4] = _nodes[0]
-                inputagent[j][5] = _nodes[-1]
+        _norm, _norm_nodes = normalize_route_path(_p)
+        if _norm is not None:
+            inputagent[j][11] = _norm
+            inputagent[j][4] = _norm_nodes[0]
+            inputagent[j][5] = _norm_nodes[-1]
+        else:
+            print(f"  [predict-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
+                  f"predicted route invalid ({_p!r}), keeping prior path", flush=True)
+            if normalize_route_path(inputagent[j][11])[0] is None:
+                raise RuntimeError(
+                    f"bigloop={bigloop} phase=predict agent={inputagent[j][0]}: "
+                    f"predicted route invalid and no prior path to fall back to")
 
 
 
@@ -1237,12 +1243,18 @@ def msa(bigloop, p, p_fix, p_realtime, seed=1, network='siouxfalls',
         _p = choiceset[
             int(com_choice[_k]), int(com_rposition[_k])
         ]
-        if _p is not None:
-            inputagent[_row][11] = _p
-            _nodes = [x.strip() for x in str(_p).split(';') if x.strip()]
-            if len(_nodes) >= 2:
-                inputagent[_row][4] = _nodes[0]
-                inputagent[_row][5] = _nodes[-1]
+        _norm, _norm_nodes = normalize_route_path(_p)
+        if _norm is not None:
+            inputagent[_row][11] = _norm
+            inputagent[_row][4] = _norm_nodes[0]
+            inputagent[_row][5] = _norm_nodes[-1]
+        else:
+            print(f"  [actual-validate] bigloop={bigloop} agent={inputagent[_row][0]}: "
+                  f"predicted route invalid ({_p!r}), keeping prior path", flush=True)
+            if normalize_route_path(inputagent[_row][11])[0] is None:
+                raise RuntimeError(
+                    f"bigloop={bigloop} phase=actual agent={inputagent[_row][0]}: "
+                    f"predicted route invalid and no prior path to fall back to")
 
 
 
