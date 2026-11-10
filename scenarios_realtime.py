@@ -61,7 +61,14 @@ Procedure
    (free-flow times when m == 0, and free-flow for any single link with
    no observations in the bin).
 4. Write the reactive plan to input_agent.csv, run DTALite once more, and
-   report total vehicle-hours from output_agent.csv.
+   report total vehicle-hours from output_agent.csv.  That second run's
+   output_LinkMOE.csv is saved as predicted_LinkMOE.csv: it is the genuine
+   real-time forecast (link volumes under the assigned routes), which is
+   what Test 6 compares against the realized volumes.  The Step 1
+   free-flow volumes must NOT be saved as the prediction: the Step 1
+   assignment calls assign_paths with an empty interval table, so every
+   interval falls back to free-flow times and the result is identical
+   for sigma = 1 and sigma = 10.
 
 This file merges two independently built implementations (builder A and
 builder B, cross-validated to produce bit-identical assignments on 3,000
@@ -874,20 +881,12 @@ def main(argv=None):
         % (len(tdmoe), len(interval_table))
     )
 
-    # Test 6 (Future Traffic Conditions Estimation): save the Step 1 link
-    # volumes as the "predicted" baseline before Step 2's run_dtalite()
-    # deletes all output_* files.  Step 1's volumes are the historical
-    # conditions the RT system uses to build X_{m-1} guidance.
-    os.makedirs(result_dir, exist_ok=True)
-    predicted_src = os.path.join(data_dir, "output_LinkMOE.csv")
-    if os.path.isfile(predicted_src):
-        shutil.copy(predicted_src,
-                    os.path.join(result_dir, "predicted_LinkMOE.csv"))
-        print("saved predicted link volumes to %s"
-              % os.path.join(result_dir, "predicted_LinkMOE.csv"))
-    else:
-        print("warning: %s not found after Step 1; "
-              "predicted link volumes not saved for Test 6" % predicted_src)
+    # Do NOT save the Step 1 link volumes as the Test 6 "predicted" file:
+    # Step 1 assigned every agent its free-flow shortest route (the
+    # interval table was empty), so its volumes are sigma-independent --
+    # Tests 2 and 3 saved byte-identical predicted_LinkMOE.csv files.
+    # The genuine forecast is the Step 2 run's volumes (saved below),
+    # i.e. link volumes under the real-time assigned routes.
 
     # Step 2: reactive assignment under X_{m-1} -> DTALite once.
     rt_paths, rt_stats = assign_paths(
@@ -907,6 +906,25 @@ def main(argv=None):
     )
     print("step 2: running DTALite ...")
     run_dtalite(data_dir, engine=args.engine)
+
+    # Test 6 (Future Traffic Conditions Estimation): save the Step 2 link
+    # volumes as the "predicted" file.  This run simulated the real-time
+    # assigned routes, so its volumes are the genuine RT forecast -- the
+    # assignments are sigma-dependent (different X_{m-1} bins), unlike
+    # the Step 1 free-flow volumes.  Saving here, after Step 2's run, also leaves the
+    # reaction inputs untouched: preference_reaction.py reads the Step 2
+    # output_LinkTDMOE.csv / output_agent.csv from data_dir, and this
+    # block only copies output_LinkMOE.csv into the result dir.
+    os.makedirs(result_dir, exist_ok=True)
+    predicted_src = os.path.join(data_dir, "output_LinkMOE.csv")
+    if not os.path.isfile(predicted_src):
+        raise ScenarioError(
+            "%s not found after Step 2; "
+            "predicted link volumes not saved for Test 6" % predicted_src)
+    shutil.copy(predicted_src,
+                os.path.join(result_dir, "predicted_LinkMOE.csv"))
+    print("saved predicted link volumes to %s"
+          % os.path.join(result_dir, "predicted_LinkMOE.csv"))
 
     vehicle_hours, n_simulated = read_vehicle_hours(
         os.path.join(data_dir, "output_agent.csv")

@@ -7,7 +7,7 @@ per-link volume discrepancy the way Bingrong's Chapter 4 Figure 8 does.
 Pairs: Test 1 pairs the bigloop-prefixed *predict_LinkMOE.csv /
 *actual_LinkMOE.csv files in test1/full_results/. Tests 2-4 pair
 testN/predicted_LinkMOE.csv (saved by the guidance scenario run:
-scenarios_realtime.py Step 1 for Tests 2/3, scenarios_ue.py final MSA
+scenarios_realtime.py Step 2 for Tests 2/3, scenarios_ue.py final MSA
 iteration for Test 4) against the reaction run's output_LinkMOE.csv,
 which wholerunner's collect_234() copies to testN/full_results/.
 Both engines write the same LinkMOE columns (PySim's writer reproduces
@@ -226,7 +226,7 @@ def analyze_scenario(results_dir, system):
     """Analyze Test 2, 3, or 4. Returns a result dict, or None if skipped.
 
     Predicted: testN/predicted_LinkMOE.csv, saved by the guidance run
-    (scenarios_realtime.py Step 1 output_LinkMOE.csv for Tests 2/3;
+    (scenarios_realtime.py Step 2 output_LinkMOE.csv for Tests 2/3;
     scenarios_ue.py final-MSA-iteration output_LinkMOE.csv for Test 4).
     Actual: the reaction run's output_LinkMOE.csv, which collect_234()
     copies to testN/full_results/ (fallback: testN/output_LinkMOE.csv).
