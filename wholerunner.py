@@ -1704,6 +1704,151 @@ def auto_clear_results(results_root, tests):
         os.makedirs(out, exist_ok=True)
 
 
+def _seed_argv(base_argv, seed, results_dir):
+    """Build the argv for one seed's subprocess run.
+
+    Removes --seeds (and its values), --seed and --results-dir (both
+    the "--opt value" and "--opt=value" spellings), then appends
+    --seed <seed> and --results-dir <results_dir>. Every other option
+    is passed through unchanged.
+    """
+    out = []
+    i = 0
+    n = len(base_argv)
+    while i < n:
+        tok = base_argv[i]
+        if tok == "--seeds":
+            i += 1
+            while i < n and not base_argv[i].startswith("-"):
+                i += 1
+            continue
+        if tok.startswith("--seeds="):
+            i += 1
+            continue
+        if tok == "--seed":
+            i += 2
+            continue
+        if tok.startswith("--seed="):
+            i += 1
+            continue
+        if tok == "--results-dir":
+            i += 2
+            continue
+        if tok.startswith("--results-dir="):
+            i += 1
+            continue
+        out.append(tok)
+        i += 1
+    out.append("--seed")
+    out.append(str(seed))
+    out.append("--results-dir")
+    out.append(results_dir)
+    return out
+
+
+def run_multiseed(args, argv):
+    """Run the whole pipeline once per seed, then aggregate.
+
+    Each seed runs as its own subprocess (python wholerunner.py with
+    --seed <seed> and a per-seed --results-dir), so seeds are fully
+    independent: a failure in one seed does not stop the others, and
+    each seed gets its own temp dir and run manifest. After a seed
+    finishes, linkmoe_delay.py is run on that seed's results (when
+    present) so delay is available for the aggregation, and
+    multiseed_aggregate.py then combines the headline metrics into
+    mean and standard deviation. Returns a process exit code (0 when
+    every seed and the aggregation succeeded).
+    """
+    seeds = list(args.seeds)
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    if any(t == "--seed" or t.startswith("--seed=") for t in raw):
+        print("ERROR: --seed and --seeds cannot be combined", file=sys.stderr)
+        return 2
+    if len(set(seeds)) != len(seeds):
+        print("ERROR: --seeds must not repeat a seed", file=sys.stderr)
+        return 2
+    if any(s < 0 for s in seeds):
+        print("ERROR: --seeds values must be non-negative", file=sys.stderr)
+        return 2
+    t_start = time.time()
+    base = os.path.abspath(args.results_dir)
+    seed_dirs = {s: base + "_seed%d" % s for s in seeds}
+    out_dir = base + "_multiseed"
+    os.makedirs(out_dir, exist_ok=True)
+    log("Multi-seed: seeds %s" % seeds)
+    log("Multi-seed: per-seed results under %s_seed<seed>" % base)
+    log("Multi-seed: aggregate output in %s" % out_dir)
+    script = os.path.abspath(__file__)
+    ok = {}
+    for s in seeds:
+        per_seed_argv = _seed_argv(raw, s, seed_dirs[s])
+        cmd = [PY, script] + per_seed_argv
+        log("Multi-seed: seed %d starting -> %s" % (s, seed_dirs[s]))
+        t0 = time.time()
+        try:
+            rc = subprocess.run(cmd).returncode
+        except Exception as e:
+            log("Multi-seed: seed %d failed to start: %s" % (s, e))
+            rc = 1
+        dt = time.time() - t0
+        ok[s] = (rc == 0)
+        log("Multi-seed: seed %d %s (%s, rc=%d)"
+            % (s, "done" if rc == 0 else "FAILED", fmt_min(dt), rc))
+        if rc != 0:
+            continue
+        delay_script = os.path.join(HERE, "linkmoe_delay.py")
+        delay_out = os.path.join(seed_dirs[s], "linkmoe_summary.txt")
+        if not os.path.isfile(delay_script):
+            log("Multi-seed: seed %d: linkmoe_delay.py not found, "
+                "delay will be unavailable for this seed" % s)
+            continue
+        try:
+            drc = subprocess.run(
+                [PY, delay_script, seed_dirs[s],
+                 "--out", delay_out]).returncode
+        except Exception as e:
+            log("Multi-seed: seed %d: delay step failed to start: %s" % (s, e))
+            continue
+        if drc == 0:
+            log("Multi-seed: seed %d: delay written to %s" % (s, delay_out))
+        else:
+            log("Multi-seed: seed %d: delay step FAILED (rc=%d); "
+                "delay will be unavailable for this seed" % (s, drc))
+    good_dirs = [seed_dirs[s] for s in seeds if ok.get(s)]
+    good_seeds = [s for s in seeds if ok.get(s)]
+    if not good_dirs:
+        print("ERROR: Multi-seed: no seed completed successfully; "
+              "nothing to aggregate", file=sys.stderr)
+        return 1
+    agg_script = os.path.join(HERE, "multiseed_aggregate.py")
+    if not os.path.isfile(agg_script):
+        print("ERROR: Multi-seed: multiseed_aggregate.py not found next to "
+              "wholerunner.py", file=sys.stderr)
+        return 1
+    agg_cmd = [PY, agg_script,
+               "--seed-dirs"] + good_dirs + [
+               "--seeds"] + [str(s) for s in good_seeds] + [
+               "--out-dir", out_dir]
+    log("Multi-seed: aggregating %d seed(s) ..." % len(good_dirs))
+    try:
+        arc = subprocess.run(agg_cmd).returncode
+    except Exception as e:
+        print("ERROR: Multi-seed: aggregation failed to start: %s" % e,
+              file=sys.stderr)
+        return 1
+    if arc != 0:
+        print("ERROR: Multi-seed: aggregation FAILED (rc=%d)" % arc,
+              file=sys.stderr)
+        return 1
+    failed = [s for s in seeds if not ok.get(s)]
+    if failed:
+        print("Multi-seed: completed with failed seed(s): %s "
+              "(aggregate covers the successful seeds only)" % failed)
+        return 1
+    log("Multi-seed: all done (%s total)" % fmt_min(time.time() - t_start))
+    return 0
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
         description="Run Bingrong Ch.4 Tests 1-6 in parallel sandboxes.")
@@ -1743,6 +1888,12 @@ def parse_args(argv=None):
     ap.add_argument("--seed", type=int, default=42,
                     help="random seed for all tests (Tests 2-4 and the v9 "
                          "pipeline; default: 42)")
+    ap.add_argument("--seeds", type=int, nargs="+", default=None,
+                    help="run all tests for each of these seeds (e.g. "
+                         "--seeds 42 43 44); each seed's results go to "
+                         "<results-dir>_seed<seed> and the headline "
+                         "metrics are aggregated into <results-dir>_multiseed. "
+                         "Cannot be combined with --seed.")
     ap.add_argument("--test1-mode", choices=["single", "sweep"],
                     default="single",
                     help="Test 1 bigloops: single = bigloop 10 only "
@@ -1802,6 +1953,13 @@ def main(argv=None):
     if not os.path.isdir(data_dir):
         print("ERROR: data dir not found: %s" % data_dir, file=sys.stderr)
         sys.exit(2)
+
+    # Multi-seed mode: run the whole pipeline once per seed (each seed
+    # in its own subprocess) and aggregate. Returns here; the
+    # single-seed body below never runs in this mode.
+    if args.seeds is not None:
+        sys.exit(run_multiseed(args, argv))
+
     os.makedirs(results_root, exist_ok=True)
     os.makedirs(temp_root, exist_ok=True)
 

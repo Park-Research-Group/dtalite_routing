@@ -210,7 +210,7 @@ def fmt(v, nd=1):
 
 def main(argv):
     if len(argv) < 2:
-        print("Usage: python linkmoe_delay.py <results_root> [--agents N]")
+        print("Usage: python linkmoe_delay.py <results_root> [--agents N] [--out PATH]")
         print("Example: python linkmoe_delay.py "
               r"C:\Users\ucg8nb\Downloads\results_dtalite")
         return 2
@@ -223,6 +223,13 @@ def main(argv):
                 agents_override = int(argv[i + 1])
             except ValueError:
                 print("warning: --agents value not an integer; ignoring")
+    out_override = None
+    if "--out" in argv:
+        i = argv.index("--out")
+        if i + 1 < len(argv):
+            out_override = argv[i + 1]
+        else:
+            print("warning: --out needs a value; ignoring")
     if not os.path.isdir(root):
         print("ERROR: results root not found: %s" % root)
         return 1
@@ -343,8 +350,11 @@ def main(argv):
     text = "\n".join(lines) + "\n"
 
     print(text)
-    out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "linkmoe_summary.txt")
+    if out_override:
+        out_path = out_override
+    else:
+        out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "linkmoe_summary.txt")
     with open(out_path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(text)
     print("Wrote %s" % out_path)
