@@ -26,19 +26,15 @@ Key modeling choices (documented so they are never ambiguous):
     route/timestamps fall back to the TD-link table at that timestamp (the
     traveltimecal analog), with pltt = tt; links missing from the table
     fall back to free-flow, then to 1.0.
-  * The tournament uses RAW attribute diffs for dataset-28 agents
-    (pref < 16650): bscale = diff. This is the MATLAB convention: in all
-    three MATLAB copies checked (matlab_fixed, the uploaded files, the
-    parity-work copy), the meanstd28 standardization lines are commented
-    out in BOTH comassignment.m (predict) and comrealtimeassignment.m
-    (reaction), so predict and reaction agree on raw diffs for
-    dataset-28. Pass --standardize to standardize dataset-28 diffs with
-    meanstd28 (SiouxFalls_net.xlsx 'weights' sheet, cols A:E, rows 2-3)
-    for the direction-of-effect experiment only. The earlier claim that
-    standardizing is the UE-folder convention (citing 'UE as information
-    new equilibrium/comassignment.m:233-236') could not be verified: that
-    file is not in the workspace. Dataset-2 agents (pref >= 16650)
-    always standardize with meanstd2 -- both MATLAB copies agree.
+  * The tournament standardizes attribute diffs for dataset-28 agents
+    (pref < 16650) with meanstd28 (SiouxFalls_net.xlsx 'weights' sheet,
+    cols A:E, rows 2-3): bscale = (diff - means) / stds. This is the UE
+    folder's convention (UE as information new equilibrium/
+    comassignment.m:233-236), the code behind Test 4's 66.54% target.
+    Pass --no-standardize to reproduce the Proposed folder's convention
+    (raw diffs; matlab_fixed/comassignment.m:247-252, commented out there)
+    for the direction-of-effect experiment. Dataset-2 agents (pref >=
+    16650) always standardize with meanstd2 -- both MATLAB folders agree.
   * fuelcost mirrors v9's traveltimecal mpg bands on realized link speed
     (>40 mph -> 32, <25 mph -> 22, else 27 mpg; gas = $3.0/gal), evaluated
     at the agent's departure timestamp.
@@ -57,9 +53,8 @@ Pipeline:
      read before the reaction run overwrites the DTALite output files.
   4. Per agent: pairwise tournament over the choice-set routes for the
      agent's OD at the agent's departure timestamp -> actual choice. The
-     standardization convention is selected by --no-standardize (default,
-     MATLAB convention: raw diffs) / --standardize (opt-in, for the
-     direction-of-effect experiment only).
+     standardization convention is selected by --standardize (default,
+     UE folder) / --no-standardize (Proposed folder).
   5. Write input_agent.csv (byte-identical to the template except the path
      column) and run DTALite.exe.
   6. Satisfaction = mean(actual == guidance, normalized) over agents with
@@ -283,14 +278,13 @@ def read_meanstd28(xlsx_path):
     """Dataset-28 standardization: sheet 'weights' cols A:E, rows 2-3.
 
     Returns (2, 5): row 0 = means, row 1 = stds. This is MATLAB's meanstd28
-    (UE msa.m:37 reads sheet 6, A2:E3 -- 'weights' is the 6th sheet). It is
-    used ONLY when --standardize is passed (direction-of-effect experiment):
-    bscale = (b - meanstd28(1,:)) ./ stds. By default the tournament uses
-    raw diffs for dataset-28 agents, matching the MATLAB code: the
-    standardization lines are commented out in both comassignment.m and
-    comrealtimeassignment.m in all three MATLAB copies checked. Values in
-    the current workbook: means [-2.73, -2.68, 2.05, -0.31, 6.0], stds
-    [1.59, 3.72, 3.07, 0.37, 6.46].
+    (UE msa.m:37 reads sheet 6, A2:E3 -- 'weights' is the 6th sheet), used
+    by the UE folder's reaction tournament (comassignment.m:233-236, the
+    code behind Test 4's 66.54%): bscale = (b - meanstd28(1,:)) ./ stds.
+    The Proposed folder's copy has this standardization commented out
+    (matlab_fixed/comassignment.m:247-252); pass --no-standardize to
+    reproduce that convention. Values in the current workbook: means
+    [-2.73, -2.68, 2.05, -0.31, 6.0], stds [1.59, 3.72, 3.07, 0.37, 6.46].
     """
     try:
         raw = pd.read_excel(
@@ -666,7 +660,7 @@ class AttributeCache:
 
 
 def tournament(od_idx, route_ids, wrow, dataset2, attr_cache, od_routes,
-               meanstd2, ts, standardize=False, meanstd28=None):
+               meanstd2, ts, standardize=True, meanstd28=None):
     """Pairwise utility tournament; returns the winning route index.
 
     Exact port of the tournament loop in v9's comrealtimeassignment
@@ -682,16 +676,14 @@ def tournament(od_idx, route_ids, wrow, dataset2, attr_cache, od_routes,
     (floor of departure minutes; MATLAB's po = floor(agent(i,2)) - 359).
 
     standardize selects the dataset-28 (pref < 16650) convention:
-      False (default) -- the MATLAB convention: raw diffs. The meanstd28
-              standardization lines are commented out in both
-              comassignment.m and comrealtimeassignment.m in all three
-              MATLAB copies checked, so predict and reaction agree.
-      True  -- standardize with meanstd28: bscale =
-              (diff - meanstd28_means) / meanstd28_stds. Opt-in only, for
-              the direction-of-effect experiment; the earlier UE-folder
-              citation for this could not be verified.
+      True  (default) -- the UE folder's convention (UE as information new
+              equilibrium/comassignment.m:233-236), behind Test 4's 66.54%
+              target: bscale = (diff - meanstd28_means) / meanstd28_stds.
+      False -- the Proposed folder's convention
+              (matlab_fixed/comassignment.m:247-252, commented out there):
+              raw diffs. Use for the direction-of-effect experiment.
     Dataset-2 agents (pref >= 16650) always standardize with meanstd2 --
-    both MATLAB copies agree there, so the flag does not touch them.
+    both MATLAB folders agree there, so the flag does not touch them.
     """
     champion = route_ids[0]
     b1 = attr_cache.get(od_idx, champion, od_routes[champion], ts)
@@ -898,14 +890,14 @@ def parse_args(argv):
     p.add_argument("--timeout", type=int, default=3600,
                    help="seconds to wait for DTALite (default 3600)")
     p.add_argument("--standardize", dest="standardize", action="store_true",
-                   default=False,
+                   default=True,
                    help="standardize dataset-28 tournament diffs with "
-                        "meanstd28 (opt-in only, for the direction-of-effect "
-                        "experiment; NOT the MATLAB convention)")
+                        "meanstd28 (UE-folder convention; default -- the "
+                        "convention behind Test 4's 66.54%% target)")
     p.add_argument("--no-standardize", dest="standardize",
                    action="store_false",
-                   help="use raw diffs for dataset-28 agents (the MATLAB "
-                        "convention; now the default)")
+                   help="use raw diffs for dataset-28 agents (Proposed-folder "
+                        "convention; for the direction-of-effect experiment)")
     args = p.parse_args(argv)
     if not args.data_dir:
         p.error("--data-dir is required: pass a writable sandbox copy of the DTALite inputs (DTALite_Files/ is read-only)")
@@ -936,8 +928,13 @@ def main(argv=None):
             os.path.join(data_dir, "input_link.csv"))
     else:
         link_info = read_network(xlsx)
-    prefs = (read_users_csv(data_dir) if _nc.is_baltimore()
-             else read_users(xlsx))
+    # agent_weights.csv (agent_id,pref) in the data dir wins whenever
+    # it is present, Baltimore or Sioux Falls alike, so preferences
+    # travel by agent_id; otherwise fall back to the users sheet.
+    if os.path.isfile(os.path.join(data_dir, "agent_weights.csv")):
+        prefs = read_users_csv(data_dir)
+    else:
+        prefs = read_users(xlsx)
     realweights = read_realweights(xlsx)
     meanstd2 = read_meanstd2(xlsx)
     meanstd28 = read_meanstd28(xlsx)

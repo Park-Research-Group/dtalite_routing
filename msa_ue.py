@@ -644,7 +644,11 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
 
 
 
-    if netconfig.is_baltimore():
+    if os.path.isfile('DTALite_Files/agent_weights.csv'):
+        # agent_weights.csv: agent_id,pref. Match by agent_id so the
+        # mapping survives any row reordering, and so the same
+        # agent_id in two rows (multi-trip) gets the same
+        # preference. Applies to Baltimore and Sioux Falls alike.
         _wdf = pd.read_csv('DTALite_Files/agent_weights.csv')
         _pref_by_agent = dict(zip(_wdf['agent_id'].astype(str),
                                   _wdf['pref'].astype(int)))
@@ -653,6 +657,10 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
             for _aid in temp_agent_data['agent_id']
         ], dtype=int)
     else:
+        # No agent_weights.csv: fall back to the users sheet,
+        # matched by row position as before. Only correct while
+        # the sheet covers every agent row (it has 36,030 rows;
+        # levels above that need agent_weights.csv).
         user = pd.read_excel(
 
             'DTALite_Files/SiouxFalls_net.xlsx',

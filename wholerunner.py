@@ -559,7 +559,8 @@ def display_loop(tracker, keys, stop_event, interval=2.0):
 # Sampling: per-(seed, level) agent file from the pool
 # ----------------------------------------------------------------------
 def sample_level(pool_file, seed, level, out_csv):
-    """Sample exactly `level` agents from the pool into out_csv.
+    """Sample exactly `level` agents from the pool into out_csv, plus
+    the matching sampled agent_weights CSV.
 
     Calls sample_pool() from sample_agents.py (built by the sampling
     layer; it must sit next to this file), passing the run seed and the
@@ -570,6 +571,13 @@ def sample_level(pool_file, seed, level, out_csv):
     missing pool file, missing sampler, wrong row count -- raises
     RuntimeError with a clear message; the caller treats that as fatal.
     Nothing here ever falls back to the old unsampled input file.
+
+    The sampled weights file is out_csv with a _weights suffix
+    (sample_agents.weights_out_path), written from the pool's
+    agent_weights.csv next to the pool file. When the pool has no
+    weights file, sampling still succeeds and a warning is logged:
+    msa.py then falls back to the users sheet (only correct up to
+    36,030 agents). Returns the sampled weights path, or None.
     """
     if not os.path.isfile(pool_file):
         raise RuntimeError(
@@ -577,6 +585,10 @@ def sample_level(pool_file, seed, level, out_csv):
             "(see the run README) and rerun; wholerunner will not fall "
             "back to the old input_agent_initial.csv" % pool_file)
     os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
+    pool_weights = os.path.join(
+        os.path.dirname(os.path.abspath(pool_file)), "agent_weights.csv")
+    out_weights = (os.path.splitext(out_csv)[0] + "_weights"
+                   + os.path.splitext(out_csv)[1])
     log("sampling %d agents from %s (seed %d, level %d) -> %s"
         % (level, os.path.basename(pool_file), seed, level, out_csv))
     try:
@@ -593,7 +605,9 @@ def sample_level(pool_file, seed, level, out_csv):
                 % script)
         cmd = [PY, script, "--pool-file", pool_file,
                "--seed", str(seed), "--n", str(level),
-               "--out", out_csv, "--level", str(level)]
+               "--out", out_csv, "--level", str(level),
+               "--weights-file", pool_weights,
+               "--out-weights", out_weights]
         rc = subprocess.run(cmd).returncode
         if rc != 0:
             raise RuntimeError(
@@ -602,7 +616,9 @@ def sample_level(pool_file, seed, level, out_csv):
     else:
         try:
             sample_agents.sample_pool(pool_file, seed, level, out_csv,
-                                      level=level)
+                                      level=level,
+                                      weights_csv=pool_weights,
+                                      out_weights_csv=out_weights)
         except Exception as e:
             raise RuntimeError(
                 "sample_pool() failed for seed %d level %d: %s"
@@ -617,7 +633,18 @@ def sample_level(pool_file, seed, level, out_csv):
             "sampler produced %d agent rows for level %d (seed %d); "
             "expected exactly %d" % (n, level, seed, level))
     log("sampled %d agents (seed %d, level %d)" % (n, seed, level))
-    return out_csv
+    if os.path.isfile(pool_weights):
+        if not os.path.isfile(out_weights):
+            raise RuntimeError(
+                "sampler wrote no weights file for seed %d level %d: %s"
+                % (seed, level, out_weights))
+        log("sampled %d agent weights (seed %d, level %d)"
+            % (level, seed, level))
+        return out_weights
+    log("WARNING: no pool weights file at %s; sampled agents will "
+        "have no weights file (msa.py falls back to the users sheet)"
+        % pool_weights)
+    return None
 
 
 def count_csv_rows(path):
@@ -630,13 +657,19 @@ def count_csv_rows(path):
 # ----------------------------------------------------------------------
 # Sandbox setup (fail-fast: any error here aborts before anything runs)
 # ----------------------------------------------------------------------
-def setup_sandbox(name, data_dir, temp_root, scripts, sample_csv=None):
+def setup_sandbox(name, data_dir, temp_root, scripts, sample_csv=None,
+                  sample_weights_csv=None):
     """Create temp/run_<pid>/<name>/ with a private DTALite_Files/ copy and
     the job's scripts. `scripts` is a list of (src_dir, filename) tuples;
     src_dir None means next to wholerunner.py, otherwise a subdir of HERE.
     When sample_csv is given, it overwrites the sandbox copy's
     input_agent_initial.csv -- that is how the per-(seed, level) sample
-    becomes the run's demand. Raises on any error."""
+    becomes the run's demand. When sample_weights_csv is given, it
+    overwrites the sandbox copy's agent_weights.csv the same way, so
+    the preference travels with the sampled agents (matched by
+    agent_id in msa.py). When it is None, the sandbox keeps whatever
+    agent_weights.csv the copytree brought in, if any. Raises on any
+    error."""
     sandbox = os.path.join(temp_root, name)
     if os.path.isdir(sandbox):
         log("removing stale sandbox %s" % sandbox)
@@ -652,6 +685,12 @@ def setup_sandbox(name, data_dir, temp_root, scripts, sample_csv=None):
         shutil.copy2(sample_csv, dst)
         log("%s: injected sampled agents (%s)"
             % (name, os.path.basename(sample_csv)))
+
+    if sample_weights_csv is not None:
+        dst = os.path.join(sandbox_data, "agent_weights.csv")
+        shutil.copy2(sample_weights_csv, dst)
+        log("%s: injected sampled agent weights (%s)"
+            % (name, os.path.basename(sample_weights_csv)))
 
     for src_dir, fn in scripts:
         if src_dir:
@@ -2568,14 +2607,16 @@ def main(argv=None):
     # same sampled file. A sampling failure is fatal, before any job
     # is set up.
     samples = {}
+    sample_weights = {}
     sample_counts = {}
     try:
         for lv in sorted(needed_levels):
             out_csv = os.path.join(temp_root, "samples",
                                    "sample_seed%d_level%d.csv"
                                    % (args.seed, lv))
-            sample_level(pool_file, args.seed, lv, out_csv)
+            w_csv = sample_level(pool_file, args.seed, lv, out_csv)
             samples[lv] = out_csv
+            sample_weights[lv] = w_csv
             sample_counts[lv] = lv
     except RuntimeError as e:
         print("ERROR: sampling failed: %s" % e, file=sys.stderr)
@@ -2672,7 +2713,8 @@ def main(argv=None):
                 continue
             sb = setup_sandbox(job["sandbox_name"], data_dir, temp_root,
                                job["scripts"],
-                               sample_csv=samples[job["level"]])
+                               sample_csv=samples[job["level"]],
+                               sample_weights_csv=sample_weights[job["level"]])
             if job.get("ue_routes_src"):
                 shutil.copy2(job["ue_routes_src"],
                              os.path.join(sb, "ue_routes.csv"))
@@ -2759,7 +2801,8 @@ def main(argv=None):
             try:
                 sb = setup_sandbox(job["sandbox_name"], data_dir,
                                    temp_root, job["scripts"],
-                                   sample_csv=samples[job["level"]])
+                                   sample_csv=samples[job["level"]],
+                                   sample_weights_csv=sample_weights[job["level"]])
             except Exception as e:
                 print("ERROR: sandbox setup failed for %s: %s"
                       % (key, e), file=sys.stderr)

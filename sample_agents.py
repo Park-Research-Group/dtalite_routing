@@ -15,9 +15,19 @@ independent draw rather than a reuse of the same RNG stream.
 
 The pool file must exist. A missing pool file is a loud failure: this
 module never falls back to another file.
+
+Preference weights travel with the agent, keyed by agent_id, never
+by row position. When a full-pool agent_weights.csv (header
+agent_id,pref) sits next to the pool file, sampling also writes the
+sampled rows -- one (agent_id, pref) row per sampled agent, in the
+same order as the sampled agent rows -- to a weights CSV derived
+from the output path (same stem with a _weights suffix), unless an
+explicit output path is given. msa.py then looks the preference up
+by agent_id, so the same agent_id always gets the same pref.
 """
 
 import argparse
+import os
 import sys
 
 import numpy as np
@@ -72,7 +82,71 @@ def _largest_remainder_counts(cell_sizes, n_agents):
     return counts
 
 
-def sample_pool(pool_csv, seed, n_agents, out_csv, level=0):
+def default_weights_path(pool_csv):
+    """agent_weights.csv sitting next to the pool file."""
+    return os.path.join(os.path.dirname(os.path.abspath(pool_csv)),
+                        "agent_weights.csv")
+
+
+def weights_out_path(out_csv):
+    """Sampled weights path derived from the sampled agent CSV path:
+    same directory and stem, with a _weights suffix."""
+    stem, ext = os.path.splitext(out_csv)
+    return stem + "_weights" + ext
+
+
+def _write_sample_weights(pool_csv, weights_csv, out_weights_csv,
+                          out_csv, sample, lineterm):
+    """Write the sampled agent_weights rows for the sampled agents.
+
+    weights_csv: the full-pool agent_weights.csv (header
+        agent_id,pref). Defaults to agent_weights.csv next to the
+        pool file. When it does not exist, warn on stderr and write
+        nothing: old pools have no weights file, and the sampler
+        must still work for them (msa.py then falls back to the
+        users sheet). When it exists, every sampled agent_id must
+        have exactly one pref row; a missing or duplicated id is a
+        loud failure, never a silent default.
+    out_weights_csv: where the sampled rows go. Defaults to the
+        sampled agent CSV path with a _weights suffix.
+    The sampled rows follow the sampled agent rows in order, one
+    (agent_id, pref) row per sampled agent, keyed by agent_id.
+    Returns the weights path written, or None when skipped.
+    """
+    if weights_csv is None:
+        weights_csv = default_weights_path(pool_csv)
+    if not os.path.isfile(weights_csv):
+        print("WARNING: no agent_weights file at %s; sampled agents "
+              "will have no weights file (msa.py falls back to the "
+              "users sheet)" % weights_csv, file=sys.stderr)
+        return None
+    if out_weights_csv is None:
+        out_weights_csv = weights_out_path(out_csv)
+    wdf = pd.read_csv(weights_csv, dtype=str, keep_default_na=False)
+    if list(wdf.columns) != ["agent_id", "pref"]:
+        raise ValueError(
+            "Weights file %s must have header agent_id,pref; got: %s"
+            % (weights_csv, list(wdf.columns)))
+    if wdf["agent_id"].duplicated().any():
+        raise ValueError(
+            "Weights file %s has duplicated agent_ids; one agent must "
+            "map to exactly one pref" % weights_csv)
+    pref_by_agent = dict(zip(wdf["agent_id"], wdf["pref"]))
+    missing = [aid for aid in sample["agent_id"]
+               if aid not in pref_by_agent]
+    if missing:
+        raise ValueError(
+            "Weights file %s has no pref for %d sampled agent(s), "
+            "e.g. agent_id %s" % (weights_csv, len(missing), missing[0]))
+    with open(out_weights_csv, "w", encoding="utf-8", newline="") as f:
+        f.write("agent_id,pref" + lineterm)
+        for aid in sample["agent_id"]:
+            f.write("%s,%s%s" % (aid, pref_by_agent[aid], lineterm))
+    return out_weights_csv
+
+
+def sample_pool(pool_csv, seed, n_agents, out_csv, level=0,
+                weights_csv=None, out_weights_csv=None):
     """Sample n_agents rows from pool_csv and write them to out_csv.
 
     pool_csv: path to the agent pool file (must exist).
@@ -81,6 +155,14 @@ def sample_pool(pool_csv, seed, n_agents, out_csv, level=0):
     out_csv: path of the sampled output file.
     level: demand level (e.g. 20000); combined with seed to derive the
         per-level RNG, so each level is an independent draw.
+    weights_csv: path to the full-pool agent_weights.csv (header
+        agent_id,pref); defaults to agent_weights.csv next to the
+        pool file. When it exists, the sampled weights are written
+        too (see _write_sample_weights); when it does not exist,
+        sampling still succeeds and only the agents are written.
+    out_weights_csv: path of the sampled weights output file;
+        defaults to the sampled agent CSV path with a _weights
+        suffix (see weights_out_path).
 
     Returns the number of rows written (== n_agents).
     Raises FileNotFoundError if the pool file is missing, ValueError for
@@ -140,6 +222,8 @@ def sample_pool(pool_csv, seed, n_agents, out_csv, level=0):
     with open(out_csv, "w", encoding="utf-8", newline="") as f:
         f.write(header + lineterm)
         sample.to_csv(f, index=False, header=False, lineterminator=lineterm)
+    _write_sample_weights(pool_csv, weights_csv, out_weights_csv,
+                          out_csv, sample, lineterm)
     return n_agents
 
 
@@ -158,15 +242,27 @@ def main(argv=None):
     parser.add_argument("--level", type=int, default=0,
                         help="demand level, combined with --seed to derive "
                              "the per-level RNG (default: 0)")
+    parser.add_argument("--weights-file", default=None,
+                        help="path to the full-pool agent_weights.csv "
+                             "(default: agent_weights.csv next to "
+                             "--pool-file)")
+    parser.add_argument("--out-weights", default=None,
+                        help="path of the sampled agent_weights CSV "
+                             "(default: <out> stem + _weights)")
     args = parser.parse_args(argv)
     try:
         n = sample_pool(args.pool_file, args.seed, args.n, args.out,
-                        level=args.level)
+                        level=args.level, weights_csv=args.weights_file,
+                        out_weights_csv=args.out_weights)
     except (FileNotFoundError, ValueError) as exc:
         print("ERROR: %s" % exc, file=sys.stderr)
         return 1
     print("Sampled %d agents (seed=%d, level=%d) from %s -> %s"
           % (n, args.seed, args.level, args.pool_file, args.out))
+    wout = weights_out_path(args.out) if args.out_weights is None \
+        else args.out_weights
+    if os.path.isfile(wout):
+        print("Sampled weights -> %s" % wout)
     return 0
 
 

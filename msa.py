@@ -605,9 +605,13 @@ def msa(bigloop, p, p_fix, p_realtime, seed=1, network='siouxfalls',
 
 
 
-    if netconfig.is_baltimore():
-        # agent_weights.csv: agent_id,pref in input_agent.csv row order.
-        # Match by agent_id so the mapping survives any row reordering.
+    if os.path.isfile('DTALite_Files/agent_weights.csv'):
+        # agent_weights.csv: agent_id,pref. Match by agent_id so the
+        # mapping survives any row reordering, and so the same
+        # agent_id in two rows (multi-trip) gets the same
+        # preference. Applies to Baltimore and Sioux Falls alike;
+        # assignment.py still reads user[i, 1] for the agent at
+        # row i, unchanged.
         _wdf = pd.read_csv('DTALite_Files/agent_weights.csv')
         _pref_by_agent = dict(zip(_wdf['agent_id'].astype(str),
                                   _wdf['pref'].astype(int)))
@@ -616,6 +620,10 @@ def msa(bigloop, p, p_fix, p_realtime, seed=1, network='siouxfalls',
             for _aid in temp_agent_data['agent_id']
         ], dtype=int)
     else:
+        # No agent_weights.csv: fall back to the users sheet,
+        # matched by row position as before. Only correct while
+        # the sheet covers every agent row (it has 36,030 rows;
+        # levels above that need agent_weights.csv).
         user = pd.read_excel(
 
             'DTALite_Files/SiouxFalls_net.xlsx',
