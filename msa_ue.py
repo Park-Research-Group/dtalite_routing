@@ -17,13 +17,17 @@ What differs from the Proposed (UO-guidance) version
   two columns: an agent-id column (header containing ``agent_id``) and a
   route-path column (header containing ``path``; ``scenarios_ue.py`` writes
   it as ``path_node_sequence``) with format ``"n1;n2;...;nK;"``.  Column
-  names are detected flexibly by substring match.  ``agent_id`` values index
-  the same agents as the ``j`` loop variable (0..dsize-1).  The CSV must be
+  names are detected flexibly by substring match.  ``agent_id`` values are
+  the agent_ids in ``input_agent_initial.csv`` column 0.  The ``j`` loop
+  variable is a ROW POSITION (0..dsize-1), not an agent_id: with sampled
+  demand the agent_ids are sparse, so every ``ue_route`` lookup maps the
+  position to its agent_id first via ``inputagent[j][0]``.  The CSV must be
   generated from the SAME demand file as ``input_agent_initial.csv`` (36k vs
   54k alignment is by ``agent_id``), and it is loaded once, before the MSA
   iteration loop.
 - In the MSA iteration loop (injection point A), guided members get
-  ``inputagent[j][11] = ue_route[int(j)]`` instead of the choiceset lookup.
+  ``inputagent[j][11] = ue_route[int(inputagent[j][0])]`` instead of the
+  choiceset lookup.
   A missing ``agent_id`` raises ``KeyError`` immediately (fail fast -- a
   silent UO fallback would contaminate the guidance).
 - In the predict phase (injection point B), guided members again receive
@@ -53,7 +57,7 @@ import subprocess
 
 from assignment import assignment, comassignment, sanitize_dtalite_outputs
 try:
-    from progress import get_pbar, dtalite_kwargs, kill_dtalite_leftovers, dtalite_timeout
+    from progress import get_pbar, dtalite_kwargs, kill_dtalite_leftovers, dtalite_timeout, check_dtalite_outputs
     _HAS_PROGRESS = True
 except ImportError:
     _HAS_PROGRESS = False
@@ -68,6 +72,24 @@ except ImportError:
         return {}
     def dtalite_timeout():
         return 900
+    def check_dtalite_outputs(label, log_path):
+            """Fail loud when DTALite exits 0 but leaves empty outputs.
+            DTALite's g_ProgramStop() exits 0 mid-assignment, so a zero exit
+            code does NOT mean the run completed: the step-0 truncation leaves
+            0-byte outputs and only the MOE writers (which never ran) would
+            have filled them. Catch that here, at the call site, instead of
+            letting a later pandas read die with a context-free EmptyDataError.
+            """
+            for _name in ("output_agent.csv", "output_LinkTDMOE.csv"):
+                _path = os.path.join("DTALite_Files", _name)
+                if (not os.path.exists(_path)) or os.path.getsize(_path) == 0:
+                    raise RuntimeError(
+                        "DTALite wrote an empty %s after %s. The exe exits 0 even "
+                        "when it stops mid-assignment, so this means the run stopped "
+                        "early -- see %s for the exe's own stop message."
+                        % (_name, label, log_path)
+                    )
+
 
 import numpy as np
 
@@ -153,11 +175,15 @@ def dividerand(driver_ids, p, p_realtime, p_fix, seed=1):
 
 
 
+    # Exact split: member and realtime are rounded, fix takes the
+    # remainder, so every agent is assigned exactly once at any (p, N).
+    # (Rounding all three independently could drop an agent, e.g. at
+    # p=0.33; the remainder is never rounded separately.)
     n_member = int(round(p * n))
 
     n_realtime = int(round(p_realtime * n))
 
-    n_fix = int(round(p_fix * n))
+    n_fix = n - n_member - n_realtime
 
 
 
@@ -171,9 +197,9 @@ def dividerand(driver_ids, p, p_realtime, p_fix, seed=1):
 
             f"(p={p}, p_realtime={p_realtime}, p_fix={p_fix}); "
 
-            "the fix_user group is silently truncated to the drivers "
+            "the fix_user group takes the remainder after the member "
 
-            "that are left."
+            "and realtime groups, so it is smaller than p_fix implies."
 
         )
 
@@ -752,10 +778,14 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
     # UE-guidance routes (loaded once, before the MSA loop)
     # =====================================================
     # ue_routes.csv must be generated from the SAME demand file as
-    # DTALite_Files/input_agent_initial.csv: agent_id values index the same
-    # agents as the `j` loop variable (0..dsize-1).  36k vs 54k alignment is
-    # by agent_id, so a CSV from the wrong demand silently misaligns --
-    # hence the explicit coverage check below.
+    # DTALite_Files/input_agent_initial.csv.  `ue_route` is keyed by
+    # agent_id (input_agent_initial.csv column 0), while `member` holds
+    # dividerand ROW POSITIONS (0..dsize-1): with sampled demand the
+    # agent_ids are sparse, so positions != agent_ids.  Every ue_route
+    # lookup/validation below therefore maps a position to its agent_id
+    # via inputagent[j][0] first.  36k vs 54k alignment is by agent_id,
+    # so a CSV from the wrong demand silently misaligns -- hence the
+    # explicit coverage check below.
     if ue_routes_path is None:
         raise ValueError(
             "ue_routes_path is required (no default); pass the path to "
@@ -799,7 +829,15 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
             f"e.g. {_bad[:5]}"
         )
     member_set = set(int(x) for x in member)
-    _missing_guided = member_set - set(ue_route.keys())
+    # member holds dividerand ROW POSITIONS, not agent_ids: map each
+    # guided member's position to its agent_id (inputagent column 0)
+    # before comparing against ue_route's agent_id keys.  (With sampled
+    # demand the agent_ids are sparse, so comparing positions directly
+    # would report nearly every guided member as missing.)  member_set
+    # itself stays positions: the predict phase below tests `jj in
+    # member_set` with jj a row position.
+    _member_agent_ids = set(int(inputagent[int(x)][0]) for x in member)
+    _missing_guided = _member_agent_ids - set(ue_route.keys())
     if _missing_guided:
         raise KeyError(
             f"ue_routes.csv ({ue_routes_path!r}) is missing UE routes for "
@@ -1014,14 +1052,17 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
             # the guidance.
 
             jj = int(j)
+            # j is a dividerand row POSITION; ue_route is keyed by
+            # agent_id, so map it via inputagent column 0 first.
+            _aid = int(inputagent[jj][0])
 
-            if jj not in ue_route:
+            if _aid not in ue_route:
 
                 raise KeyError(
 
                     "Agent "
 
-                    f"{jj} (bigloop={bigloop}) missing from UE routes "
+                    f"{_aid} (bigloop={bigloop}) missing from UE routes "
 
                     f"file {ue_routes_path!r}. ue_routes.csv must be "
 
@@ -1035,14 +1076,14 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
 
 
 
-            _norm, _norm_nodes = normalize_route_path(ue_route[jj])
+            _norm, _norm_nodes = normalize_route_path(ue_route[_aid])
             if _norm is not None:
                 inputagent[j][11] = _norm
                 inputagent[j][4] = _norm_nodes[0]
                 inputagent[j][5] = _norm_nodes[-1]
             else:
                 print(f"  [ue-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
-                      f"UE route invalid ({ue_route[jj]!r}), keeping prior path", flush=True)
+                      f"UE route invalid ({ue_route[_aid]!r}), keeping prior path", flush=True)
                 if normalize_route_path(inputagent[j][11])[0] is None:
                     raise RuntimeError(
                         f"bigloop={bigloop} phase=ue-route agent={inputagent[j][0]}: "
@@ -1088,6 +1129,11 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
                 raise RuntimeError(
                     f"DTALite.exe timed out after {dtalite_timeout()}s (bigloop={bigloop}, itr={itr})")
         _pbar.update(1)
+        # Same debug.log pointer as the predict check below: no
+        # per-call log is written here (stdout goes to DEVNULL via
+        # dtalite_kwargs), so the helper only uses it in its message.
+        check_dtalite_outputs("bigloop %d itr %d" % (bigloop, itr),
+                              "DTALite_Files/debug.log")
 
         sanitize_dtalite_outputs()
 
@@ -1223,27 +1269,30 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
         jj = int(j)
 
         if jj in member_set:
+            # jj is a dividerand row POSITION; ue_route is keyed by
+            # agent_id, so map it via inputagent column 0 first.
+            _aid = int(inputagent[jj][0])
 
-            if jj not in ue_route:
+            if _aid not in ue_route:
 
                 raise KeyError(
 
                     "Agent "
 
-                    f"{jj} (bigloop={bigloop}) missing from UE routes "
+                    f"{_aid} (bigloop={bigloop}) missing from UE routes "
 
                     f"file {ue_routes_path!r}."
 
                 )
 
-            _norm, _norm_nodes = normalize_route_path(ue_route[jj])
+            _norm, _norm_nodes = normalize_route_path(ue_route[_aid])
             if _norm is not None:
                 inputagent[j][11] = _norm
                 inputagent[j][4] = _norm_nodes[0]
                 inputagent[j][5] = _norm_nodes[-1]
             else:
                 print(f"  [ue-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
-                      f"UE route invalid ({ue_route[jj]!r}), keeping prior path", flush=True)
+                      f"UE route invalid ({ue_route[_aid]!r}), keeping prior path", flush=True)
                 if normalize_route_path(inputagent[j][11])[0] is None:
                     raise RuntimeError(
                         f"bigloop={bigloop} phase=ue-route agent={inputagent[j][0]}: "
@@ -1257,6 +1306,8 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
             _norm, _norm_nodes = normalize_route_path(_p_ue)
             if _norm is not None:
                 inputagent[j][11] = _norm
+                inputagent[j][4] = _norm_nodes[0]
+                inputagent[j][5] = _norm_nodes[-1]
             else:
                 print(f"  [predict-validate] bigloop={bigloop} agent={inputagent[j][0]}: "
                       f"predicted route invalid ({_p_ue!r}), keeping prior path", flush=True)
@@ -1288,6 +1339,12 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
             kill_dtalite_leftovers()
             raise RuntimeError(
                 f"DTALite.exe timed out after {dtalite_timeout()}s (bigloop={bigloop}, phase=predict)")
+
+    # Fail loud here (as msa.py does) instead of letting a later
+    # pandas read die with a context-free EmptyDataError. No
+    # per-call log is written here (stdout goes to DEVNULL via
+    # dtalite_kwargs), so point at DTALite's own debug.log.
+    check_dtalite_outputs("bigloop %d predict" % bigloop, "DTALite_Files/debug.log")
 
     sanitize_dtalite_outputs()
 
@@ -1418,6 +1475,10 @@ def msa_ue(bigloop, p, p_fix, p_realtime, ue_routes_path, seed=1,
             kill_dtalite_leftovers()
             raise RuntimeError(
                 f"DTALite.exe timed out after {dtalite_timeout()}s (bigloop={bigloop}, phase=actual)")
+
+    # Same debug.log pointer as the predict check above.
+    check_dtalite_outputs("bigloop %d actual" % bigloop,
+                          "DTALite_Files/debug.log")
 
     sanitize_dtalite_outputs()
 

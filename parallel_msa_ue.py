@@ -139,7 +139,10 @@ def stage_run_dir(run_id, source_dir=SOURCE_DIR, repo_root=None):
         warnings.warn(f"Removing stale sandbox: {run_dir}")
         shutil.rmtree(run_dir, ignore_errors=True)
 
-    shutil.copytree(src, dst)
+    # dirs_exist_ok=True: a retry after a crashed run can find the
+    # sandbox half-removed (the rmtree above uses ignore_errors=True),
+    # and without this the copy fails with FileExistsError.
+    shutil.copytree(src, dst, dirs_exist_ok=True)
     # bigloop1-fix: staged inputs must never carry another run's outputs.
     # The sweep sandbox accumulates {n}actual_/{n}predict_/{n}UOinfor_ files
     # via collect_results, so a late-staging Run would otherwise inherit them.

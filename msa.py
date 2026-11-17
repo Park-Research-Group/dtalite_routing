@@ -95,11 +95,15 @@ def dividerand(driver_ids, p, p_realtime, p_fix, seed=1):
 
 
 
+    # Exact split: member and realtime are rounded, fix takes the
+    # remainder, so every agent is assigned exactly once at any (p, N).
+    # (Rounding all three independently could drop an agent, e.g. at
+    # p=0.33; the remainder is never rounded separately.)
     n_member = int(round(p * n))
 
     n_realtime = int(round(p_realtime * n))
 
-    n_fix = int(round(p_fix * n))
+    n_fix = n - n_member - n_realtime
 
 
 

@@ -959,15 +959,23 @@ def _assignment_impl(itr, choiceset, user, routelocation, weights, meanstd28, me
 
 
 
-    # Reorder phase-concatenated results to agent-ID order.
-    # Init from nchoice/rposition so any agent missing from phases keeps its value.
+    # Reorder phase-concatenated results to file-row order.
+    # _phase_aids holds agent IDs, NOT row positions: with sampled
+    # demand the IDs are sparse (e.g. 26701 in a 200-agent file), so
+    # indexing the row-length _rc/_rr by agent ID writes one agent's
+    # choice into another agent's row (and silently drops IDs >=
+    # dsize). Map each agent ID to its file row first, exactly as
+    # comassignment does below. Init from nchoice/rposition so any
+    # agent missing from phases keeps its value.
     _rc = [int(v) for v in np.asarray(nchoice).reshape(-1)]
     _rr = [int(v) for v in np.asarray(rposition).reshape(-1)]
+    _aid_to_row = {float(_r[0]): _i for _i, _r in enumerate(inputagent)}
     for _k in range(len(final_choice)):
-        _aid = _phase_aids[_k]
-        if 0 <= _aid < dsize:
-            _rc[_aid] = int(final_choice[_k])
-            _rr[_aid] = int(final_rposition[_k])
+        _row = _aid_to_row.get(float(_phase_aids[_k]))
+        if _row is None:
+            continue
+        _rc[_row] = int(final_choice[_k])
+        _rr[_row] = int(final_rposition[_k])
     final_choice = _rc
     final_rposition = _rr
 

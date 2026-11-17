@@ -1,58 +1,73 @@
 #!/usr/bin/env python3
 """
-wholerunner.py -- Run Bingrong Ch.4 Tests 1-6 in parallel sandboxes.
+wholerunner.py -- Run the new Tests 1-4 in parallel sandboxes (v2 revamp).
 
-Tests at 100% MPR (Sioux Falls, 54k demand):
-  Test 1 -- Proposed (proactive preference-aware guidance) ... via v9 pipeline
-  Test 2 -- Real-time guidance, sigma=1 min ................. via scenarios_realtime.py
-  Test 3 -- Real-time guidance, sigma=10 min ................ via scenarios_realtime.py
-  Test 4 -- UE as information (MSA baseline) ................ via scenarios_ue.py
-  Test 5 -- MPR sweep: Proposed bigloops 0-10 plus UE-guidance bigloops 1-10,
-            then mpr_aggregate.py builds Tables 5 & 6
-  Test 6 -- Future-condition volume estimation (Figure 8) ... via volume_estimation.py
-            (smart mode: runs prerequisite Tests 1-4 first unless their
-            results already exist; --test6-force-rerun rebuilds them anyway)
+Tests at exactly 50,000 agents sampled per seed from a ~200k-agent pool
+(--pool-file; --baseline-level overrides the 50,000 default), plus a
+demand-level sweep:
 
-Each test/sweep gets its own sandbox under temp/run_<pid>/<name>/: a private
-copy of DTALite_Files/ (the real one stays read-only) plus the scripts that
-job needs. Phase-A jobs (Tests 1-4 and Test 5's proposed sweep) run
-concurrently as separate processes -- no shared writable state -- and all
-outputs are collected under <results-dir>/.
+  Test 1 -- Baseline at 50k: all four systems, each in its own sandbox:
+            Proposed (v9 pipeline, bigloop 10), Real-time 1-min,
+            Real-time 10-min, UE guidance (scenarios + preference_reaction).
+  Test 2 -- MPR sweep at the 50k baseline (old Test 5): Proposed bigloops
+            0-10 plus UE-guidance bigloops 1-10, then mpr_aggregate.py.
+  Test 3 -- Demand levels (default 20k, 30k, 40k, 50k, 60k, 70k, 80k).
+            At EACH level: the four systems plus the MPR sweep at 33% and
+            66% (proposed AND UE). The 50k level is re-run, not reused.
+  Test 4 -- Link-volume validation (old Test 6) at the 50k baseline only:
+            volume_estimation.py over Test 1's four systems. Per-level
+            prediction accuracy comes from Test 3's saved predicted/actual
+            LinkMOE files, not from a separate Test 4 per level.
 
-While the jobs run, a live progress display shows one bar per job, refreshed
-every 2 seconds (main thread). Subprocess stdout is captured via PIPE, parsed
-for progress markers, and also written to each sandbox's run.log. Use
---no-progress to disable the display (e.g. when redirecting output to a file).
+Each job gets its own sandbox under temp/run_<pid>/<name>/: a private copy
+of DTALite_Files/ (the real one stays read-only) plus the scripts that job
+needs, with the per-(seed, level) sampled agent file injected as
+input_agent_initial.csv. Jobs run concurrently as separate processes --
+no shared writable state -- and all outputs are collected under
+<results-dir>/.
+
+Every job appends its row(s) to the per-seed master summary at
+<results-dir>_seed<S>/summary.csv (see SUMMARY_COLUMNS below). That file
+is the contract with the results/aggregation agent: exactly those
+columns, in that order.
+
+While the jobs run, a live progress display shows one bar per job,
+refreshed every 2 seconds (main thread). Subprocess stdout is captured
+via run.log files, parsed for progress markers. Use --no-progress to
+disable the display (e.g. when redirecting output to a file).
 
 Usage:
-  python wholerunner.py --tests 1                    # Test 1 only (bigloop 10)
-  python wholerunner.py --tests 1,2,3,4              # as before
-  python wholerunner.py --tests 5                    # Test 5: both MPR sweeps + aggregation
-  python wholerunner.py --tests 6                    # Test 6 smart mode (uses existing results if usable)
-  python wholerunner.py --tests 1-6                  # everything
-  python wholerunner.py --tests 1-4,6                # ranges + singles
-  python wholerunner.py --tests 5 --skip-aggregation # sweeps only, aggregate later by hand
+  python wholerunner.py --seed 42                 # single seed, all tests
+  python wholerunner.py                            # all 10 default seeds
+  python wholerunner.py --tests 1                  # Test 1 only
+  python wholerunner.py --tests 1,3 --levels 20000,50000
+  python wholerunner.py --tests 2 --skip-aggregation
   python wholerunner.py --data-dir DTALite_Files --results-dir results
+  python wholerunner.py --pool-file pool.csv --seeds 42 43
 
-Outputs per test under <results-dir>/:
-  test1/    proposed_summary.txt, full_results/ (bigloop result CSVs)
-  test2/    realtime_routes.csv, realtime_summary.txt, actual_routes.csv,
-            reaction_summary.txt, predicted_LinkMOE.csv, full_results/
-  test3/    (same as test2)
-  test4/    ue_routes.csv, ue_summary.txt, actual_routes.csv,
-            reaction_summary.txt, predicted_LinkMOE.csv, full_results/
-  test5/    proposed_sweep/bigloop_0..10/, ue_sweep/bigloop_1..10/,
-            mpr_table5.csv, mpr_table6.csv, mpr_summary.txt
-  test6/    volume_estimation.csv, volume_estimation_summary.txt
-  (root)    table4_emissions.csv, table4_emissions_summary.txt
-            (Tests 1-4 per-scenario emissions, via table4_emissions.py)
+Outputs per test under <results-dir>/ (per seed; see summary.csv):
+  test1/proposed/  proposed_summary.txt, full_results/ (bigloop-10 CSVs)
+  test1/rt1/       realtime_routes.csv, reaction_summary.txt,
+                   predicted_LinkMOE.csv, full_results/
+  test1/rt10/      (same as rt1)
+  test1/ue/        ue_routes.csv, reaction_summary.txt,
+                   predicted_LinkMOE.csv, full_results/
+  test2/proposed_sweep/bigloop_0..10/, ue_sweep/bigloop_1..10/,
+                   mpr_table5.csv, mpr_table6.csv, mpr_summary.txt
+  test3/level_<N>/proposed|rt1|rt10|ue/  (same layout as test1/)
+  test3/level_<N>/proposed_sweep/bigloop_33|66/,
+                   ue_sweep/bigloop_33|66/
+  test4/           volume_estimation.csv, volume_estimation_summary.txt
+  (root)           summary.csv, manifest.txt
 
 Sandboxes live in temp/run_<pid>/<name>/ and are deleted on success unless
 --keep-temp is given. On failure the sandbox is kept and its path is
 printed for debugging; other jobs keep running.
 
-Test 5 needs the UE-guidance trio (runner_parallel_ue.py, parallel_msa_ue.py,
-msa_ue.py) next to this file, plus the v9 support scripts.
+Seeds: bare invocation runs the 10 default seeds (42, 423, 454, 162, 904,
+916, 91, 962, 201, 624), one subprocess per seed via run_multiseed.
+Pass --seed <S> for a single seed, or --seeds to override the list.
+--seed and --seeds together is an error.
 
 Python 3.9 compatible, stdlib only.
 """
@@ -74,106 +89,77 @@ import warnings
 HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
-# Bingrong's satisfaction targets (100% MPR), used by preference_reaction
+# Default seed list (the established 10-seed set). --seeds overrides this.
+DEFAULT_SEEDS = [42, 423, 454, 162, 904, 916, 91, 962, 201, 624]
+
+# Baseline demand: every test except Test 3 samples exactly this many
+# agents per seed from the pool. Overridable with --baseline-level
+# (default 50000); main() applies the flag to this global before any
+# sampling or job setup runs, so every BASELINE_LEVEL use below follows
+# the flag. Test 3 levels still come from --levels.
+BASELINE_LEVEL = 50000
+
+# Bingrong's satisfaction targets, used by preference_reaction
 TARGETS = {
-    2: 70.49,  # real-time 1min
-    3: 70.19,  # real-time 10min
-    4: 66.54,  # UE as information
+    "realtime_1min": 70.49,   # real-time 1min
+    "realtime_10min": 70.19,  # real-time 10min
+    "ue": 66.54,              # UE as information
 }
 
-# Test 1 (Proposed) reference targets, Sun (2018) Ch.4 Tables 8 & 9
+# Test 1 (Proposed) reference targets, Sun (2018) Ch.4 Tables 8 & 9.
+# Vehicle-hours target is for 54,045 agents; at 50k it is a rough
+# reference only, not a pass/fail bar.
 T1_SAT_RATE = 88.64      # % of agents whose actual choice matched UO guidance
 T1_VEH_HRS = 24719.3     # system vehicle-hours (54,045 agents)
 T1_MIN_PER_AGENT = 27.44
 
-# v9 pipeline support scripts (shared by Test 1 and Test 5's proposed sweep)
+# v9 pipeline support scripts (shared by the Proposed jobs and sweeps)
 V9_SCRIPTS = ["runner_parallel.py", "parallel_msa.py", "msa.py",
               "assignment.py", "realtimeassignment.py",
               "traveltimecal.py", "progress.py", "choiceset.py",
               "netconfig.py"]
 
+# UE-guidance sweep scripts (the UE trio + the 5 v9 support scripts +
+# netconfig.py), all next to wholerunner.py.
+UE_SWEEP_SCRIPTS = ["runner_parallel_ue.py", "parallel_msa_ue.py",
+                    "msa_ue.py", "assignment.py",
+                    "realtimeassignment.py", "traveltimecal.py",
+                    "progress.py", "choiceset.py", "netconfig.py"]
+
 # Simulation-engine files staged into EVERY sandbox alongside the scripts
-# above (setup_sandbox copies them for all tests, so the engine is
+# above (setup_sandbox copies them for all jobs, so the engine is
 # available wherever a script runs -- including inside RunX/ workers,
 # which resolve run_pysim.py and pysim/ from engine.py's own directory).
-# These are NOT part of the per-test script lists: they are engine
-# plumbing, not test logic, and every test needs them.
 ENGINE_FILES = ["engine.py", "run_pysim.py"]
 ENGINE_DIRS = ["pysim"]
 
-# Test registry. "kind" tells main() how to run the entry:
-#   "v9" / "scenario" -- one sandbox, one command sequence (run_test)
-#   "dual-sweep"      -- two parallel sandboxes + aggregation (Test 5)
-#   "analysis"        -- in-place, no sandbox (Test 6)
-TESTS = {
-    1: {"label": "Test 1: Proposed -- v9 pipeline",
-        "kind": "v9",
-        "scripts": V9_SCRIPTS},
-    2: {"label": "Test 2: real-time guidance, sigma=1 min",
-        "kind": "scenario",
-        "scripts": ["scenarios_realtime.py", "preference_reaction.py",
-                    "netconfig.py"],
-        "sigma": 1, "target": TARGETS[2]},
-    3: {"label": "Test 3: real-time guidance, sigma=10 min",
-        "kind": "scenario",
-        "scripts": ["scenarios_realtime.py", "preference_reaction.py",
-                    "netconfig.py"],
-        "sigma": 10, "target": TARGETS[3]},
-    4: {"label": "Test 4: UE as information (MSA baseline)",
-        "kind": "scenario",
-        "scripts": ["scenarios_ue.py", "preference_reaction.py",
-                    "netconfig.py"],
-        "target": TARGETS[4]},
-    5: {"label": "Test 5: MPR sweep (Proposed + UE-guidance)",
-        "kind": "dual-sweep",
-        "subs": {
-            "P": {"label": "proposed sweep",
-                  "scripts": V9_SCRIPTS, "script_dir": None,
-                  "bigloops": "0-10", "n_bigloops": 11},
-            "U": {"label": "UE-guidance sweep",
-                  "scripts": ["runner_parallel_ue.py", "parallel_msa_ue.py",
-                              "msa_ue.py", "assignment.py",
-                              "realtimeassignment.py", "traveltimecal.py",
-                              "progress.py", "choiceset.py", "netconfig.py"],
-                  # All 9 scripts (the UE-guidance trio, the 5 v9 support
-                  # scripts, and netconfig.py) live next to wholerunner.py.
-                  "script_dir": None,
-                  "bigloops": "1-10", "n_bigloops": 10},
-        }},
-    6: {"label": "Test 6: future-condition volume estimation",
-        "kind": "analysis"},
-}
+# Method labels used in summary.csv and in result directory names.
+METHODS = ("proposed", "realtime_1min", "realtime_10min", "ue")
+METHOD_DIRS = {"proposed": "proposed", "realtime_1min": "rt1",
+               "realtime_10min": "rt10", "ue": "ue"}
 
-# Results subdirectory per test
-RESULT_DIR_NAMES = {1: "test1", 2: "test2", 3: "test3",
-                    4: "test4", 5: "test5", 6: "test6"}
+# Per-seed master summary: the column list is the contract with the
+# results/aggregation agent. Exactly these columns, in this order.
+# Empty string marks a metric that does not apply to a row (mpr is empty
+# for a non-sweep method row; linkvol_acc is empty where no
+# predicted/actual LinkMOE pair was available to compute it from).
+SUMMARY_COLUMNS = ["seed", "test", "level", "method", "mpr",
+                   "satisfaction", "veh_hrs", "delay", "energy", "co2",
+                   "nox", "co", "hc", "linkvol_acc", "max_vc", "p95_vc",
+                   "over_cap", "heavy"]
 
-# Short labels for the progress display
-DISPLAY_LABELS = {1: "Test 1 (Proposed)",
-                  2: "Test 2 (RT-1min)",
-                  3: "Test 3 (RT-10min)",
-                  4: "Test 4 (UE)",
-                  "5P": "Test 5 Proposed sweep",
-                  "5U": "Test 5 UE sweep",
-                  "5A": "Test 5 (aggregate)",
-                  6: "Test 6 (volume est.)"}
-
-# Bigloop result files collected for Test 1: the 9 result CSVs from the
-# parity checker ({b}UOinfor/predict/actual x agent/LinkMOE/LinkTDMOE).
+# Bigloop result files collected for Proposed jobs: the 9 result CSVs
+# ({b}UOinfor/predict/actual x agent/LinkMOE/LinkTDMOE).
 T1_KINDS = ("agent", "LinkMOE", "LinkTDMOE")
 T1_TAGS = ("UOinfor", "predict", "actual")
 TAG_RE = re.compile(r"^(\d+)(UOinfor|predict|actual)_agent\.csv$")
 
-# Test 1: the v9 pipeline runs N bigloops in parallel (default 11),
-# each doing M MSA iterations (default 18). The progress parser
-# tracks total iterations completed across all bigloops (N*M).
-# Test 4 MSA iteration cap (matches scenarios_ue.py --max-iters default).
-T4_MAX_ITERS = 50
+# Test 1's UE job MSA iteration cap (matches scenarios_ue.py --max-iters).
+UE_MAX_ITERS = 50
 
-# LinkMOE filename suffixes (mirrored from volume_estimation.py so the
-# Test 6 "results exist" check matches what it pairs up).
-T6_PREDICT_SUFFIX = "predict_LinkMOE.csv"
-T6_ACTUAL_SUFFIX = "actual_LinkMOE.csv"
+# LinkMOE filename suffixes (mirrored from volume_estimation.py).
+T4_PREDICT_SUFFIX = "predict_LinkMOE.csv"
+T4_ACTUAL_SUFFIX = "actual_LinkMOE.csv"
 
 
 def log(msg):
@@ -185,11 +171,11 @@ def fmt_min(sec):
 
 
 # ----------------------------------------------------------------------
-# --tests spec parsing
+# --tests / --levels / --mpr-points spec parsing
 # ----------------------------------------------------------------------
 def parse_tests_spec(spec):
-    """'1-4,6' -> [1, 2, 3, 4, 6]. Raises ValueError on bad input or
-    unknown test numbers."""
+    """'1-3' -> [1, 2, 3]. Raises ValueError on bad input or unknown
+    test numbers. Valid tests are 1-4 only; the old 1-6 numbering is gone."""
     out = []
     for part in spec.split(","):
         part = part.strip()
@@ -210,60 +196,74 @@ def parse_tests_spec(spec):
             except ValueError:
                 raise ValueError("invalid test %r in --tests" % part)
     tests = sorted(set(out))
-    bad = [t for t in tests if t not in TESTS]
+    bad = [t for t in tests if t not in (1, 2, 3, 4)]
     if bad:
-        raise ValueError("unknown test(s) %s (valid: 1-6)" % bad)
+        raise ValueError("unknown test(s) %s (valid: 1-4)" % bad)
     if not tests:
         raise ValueError("--tests selected no tests")
     return tests
 
 
-def progress_keys(selected):
-    """Ordered tracker keys for the whole run. Only tests in the
-    --tests selection get a bar (no phantom entries for dependencies)."""
-    keys = []
-    for t in selected:
-        if t == 5:
-            keys += ["5P", "5U", "5A"]
-        else:
-            keys.append(t)
-    return keys
-
+def parse_int_list(spec, flag, lo=None, hi=None):
+    """'20000,30000' -> [20000, 30000]. Raises ValueError on bad input
+    or values outside [lo, hi] when bounds are given."""
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            v = int(part)
+        except ValueError:
+            raise ValueError("invalid value %r in %s" % (part, flag))
+        if lo is not None and v < lo:
+            raise ValueError("%s value %d is below %d" % (flag, v, lo))
+        if hi is not None and v > hi:
+            raise ValueError("%s value %d is above %d" % (flag, v, hi))
+        out.append(v)
+    out = sorted(set(out))
+    if not out:
+        raise ValueError("%s selected no values" % flag)
+    return out
 
 # ----------------------------------------------------------------------
-# Progress tracking (thread-safe; one entry per test)
+# Progress tracking (thread-safe; one entry per job)
 # ----------------------------------------------------------------------
 class ProgressTracker:
-    """Thread-safe per-test progress: fraction 0.0-1.0 plus a short
+    """Thread-safe per-job progress: fraction 0.0-1.0 plus a short
     status string. Fractions are monotonic (never move backwards)."""
 
-    def __init__(self, tests):
+    def __init__(self, keys):
         self._lock = threading.Lock()
-        self._frac = {t: 0.0 for t in tests}
-        self._status = {t: "starting..." for t in tests}
-        self._done = {t: False for t in tests}
-        self._t0 = {t: None for t in tests}
+        self._frac = {t: 0.0 for t in keys}
+        self._status = {t: "starting..." for t in keys}
+        self._done = {t: False for t in keys}
+        self._t0 = {t: None for t in keys}
 
-    def start(self, test):
+    def start(self, key):
         with self._lock:
-            self._t0[test] = time.time()
-            self._status[test] = "starting..."
+            self._t0[key] = time.time()
+            self._status[key] = "starting..."
 
-    def update(self, test, frac, status=None):
+    def update(self, key, frac, status=None):
         """frac=None keeps the current fraction (status-only update)."""
         with self._lock:
-            if frac is not None and frac > self._frac[test]:
-                self._frac[test] = min(frac, 1.0)
+            if key not in self._frac:
+                return
+            if frac is not None and frac > self._frac[key]:
+                self._frac[key] = min(frac, 1.0)
             if status is not None:
-                self._status[test] = status
+                self._status[key] = status
 
-    def finish(self, test, ok, status=None):
+    def finish(self, key, ok, status=None):
         """status overrides the default "done"/"FAILED" text (e.g. "skipped")."""
         with self._lock:
-            self._frac[test] = 1.0
-            self._done[test] = True
-            self._status[test] = (status if status is not None
-                                  else ("done" if ok else "FAILED"))
+            if key not in self._frac:
+                return
+            self._frac[key] = 1.0
+            self._done[key] = True
+            self._status[key] = (status if status is not None
+                                 else ("done" if ok else "FAILED"))
 
     def snapshot(self):
         with self._lock:
@@ -308,9 +308,8 @@ class SweepProgressState:
 
 
 def parse_v9_sweep_line(line, tracker, key, state):
-    """Generalized Test-1 line parser. `key` is the tracker key
-    (1, "5P", "5U"); `state` is a SweepProgressState. Returns True if the
-    line was handled."""
+    """v9 sweep line parser. `key` is the tracker key; `state` is a
+    SweepProgressState. Returns True if the line was handled."""
     m = _T1_LAUNCH_RE.search(line)
     if m:
         try:
@@ -347,7 +346,6 @@ def parse_v9_sweep_line(line, tracker, key, state):
             b = int(m.group(1))
         except ValueError:
             return False
-        # Mark this bigloop as complete (all iterations done).
         if state.iters.get(b, 0) < state.iters_per:
             state.iters[b] = state.iters_per
         total = sum(state.iters.values())
@@ -359,8 +357,8 @@ def parse_v9_sweep_line(line, tracker, key, state):
         return True
     # Legacy fallback: a bare "bigloop N" with no iteration info.
     # Only use if we haven't seen any itr data yet AND N is a valid
-    # 0-based bigloop index. Otherwise ignore -- the itr/done patterns
-    # are authoritative, and N may be a bigloop ID (e.g. 10) rather
+    # bigloop index. Otherwise ignore -- the itr/done patterns are
+    # authoritative, and N may be a bigloop ID (e.g. 10 or 33) rather
     # than a progress count.
     m = _BIGLOOP_RE.search(line)
     if m:
@@ -384,111 +382,110 @@ def parse_v9_sweep_line(line, tracker, key, state):
     return False
 
 
-# Per-sweep parser state: Test 1 keeps its default 11-bigloop shape,
-# Test 5's sweeps are initialized to theirs (the launch line corrects
-# any drift when the run starts).
-_T1_STATE = SweepProgressState(11)
-_SWEEP_STATES = {"5P": SweepProgressState(11), "5U": SweepProgressState(10)}
+# Per-job parser state: one SweepProgressState per v9 job key, created
+# lazily (the launch line corrects the bigloop count when the run starts).
+_SWEEP_STATES = {}
+
+# Parser kind per job key, filled in when jobs are built:
+#   "v9" -- runner_parallel.py jobs (Proposed job and Proposed sweeps)
+#   "rt" -- scenarios_realtime.py + preference_reaction.py
+#   "ue" -- scenarios_ue.py + preference_reaction.py
+JOB_KINDS = {}
 
 
-def parse_test1_line(line, tracker):
-    """Test 1 keeps byte-identical behavior via the shared parser."""
-    return parse_v9_sweep_line(line, tracker, 1, _T1_STATE)
-
-
-def _parse_reaction_line(test, line, tracker, base):
+def _parse_reaction_line(key, line, tracker, base):
     """Shared preference_reaction.py markers. base is where the reaction
-    phase starts (0.50 for tests 2/3, 0.80 for test 4); spans to 1.0."""
+    phase starts (0.50 for real-time jobs, 0.80 for UE jobs); spans to 1.0."""
     low = line.lower()
     span = 1.0 - base
     if "loading network" in low:
-        tracker.update(test, base + span * 0.10, "reaction: loading data")
+        tracker.update(key, base + span * 0.10, "reaction: loading data")
         return True
     if "tournament run for" in low:
-        tracker.update(test, base + span * 0.40, "reaction: tournament done")
+        tracker.update(key, base + span * 0.40, "reaction: tournament done")
         return True
     if "writing" in low and "input_agent" in low:
-        tracker.update(test, base + span * 0.50, "reaction: writing input")
+        tracker.update(key, base + span * 0.50, "reaction: writing input")
         return True
     if "running dtalite" in low or "running pysim" in low:
-        tracker.update(test, base + span * 0.70, "reaction: engine")
+        tracker.update(key, base + span * 0.70, "reaction: engine")
         return True
     if "actual_routes" in low and "wrote" in low:
-        tracker.update(test, base + span * 0.90, "reaction: routes written")
+        tracker.update(key, base + span * 0.90, "reaction: routes written")
         return True
     if "reaction_summary" in low or ("wrote" in low and "summary" in low):
-        tracker.update(test, 1.0, "done")
+        tracker.update(key, 1.0, "done")
         return True
     if low.strip().startswith("satisfaction:"):
-        tracker.update(test, 1.0, line.strip()[:44])
+        tracker.update(key, 1.0, line.strip()[:44])
         return True
     return False
 
 
-def parse_test23_line(cmd_idx, line, tracker, test):
+def parse_rt_line(cmd_idx, line, tracker, key):
     low = line.lower()
     if cmd_idx == 0:  # scenarios_realtime.py (guidance), spans 0.0-0.50
         if "step 1:" in low:
             if "running dtalite" in low:
-                tracker.update(test, 0.20, "step 1: DTALite baseline")
+                tracker.update(key, 0.20, "step 1: DTALite baseline")
             else:
-                tracker.update(test, 0.10, "step 1: free-flow assignment")
+                tracker.update(key, 0.10, "step 1: free-flow assignment")
             return True
         if "step 2:" in low:
             if "running dtalite" in low:
-                tracker.update(test, 0.40, "step 2: DTALite reactive")
+                tracker.update(key, 0.40, "step 2: DTALite reactive")
             else:
-                tracker.update(test, 0.30, "step 2: reactive assignment")
+                tracker.update(key, 0.30, "step 2: reactive assignment")
             return True
         if "realtime_routes" in low and "wrote" in low:
-            tracker.update(test, 0.50, "guidance complete")
+            tracker.update(key, 0.50, "guidance complete")
             return True
         return False
     # cmd_idx == 1: preference_reaction.py, spans 0.50-1.0
-    return _parse_reaction_line(test, line, tracker, 0.50)
+    return _parse_reaction_line(key, line, tracker, 0.50)
 
 
-def parse_test4_line(cmd_idx, line, tracker):
+def parse_ue_line(cmd_idx, line, tracker, key):
     low = line.lower()
     if cmd_idx == 0:  # scenarios_ue.py (guidance), spans 0.0-0.80
         m = _ITER_RE.search(low)
         if m:
             n = int(m.group(1))
-            frac = 0.05 + (n / T4_MAX_ITERS) * 0.75
-            status = "iter %d/%d" % (n, T4_MAX_ITERS)
+            frac = 0.05 + (n / UE_MAX_ITERS) * 0.75
+            status = "iter %d/%d" % (n, UE_MAX_ITERS)
             gm = _GAP_RE.search(low)
             if gm:
                 status += " gap=%s" % gm.group(1)
-            tracker.update(4, frac, status)
+            tracker.update(key, frac, status)
             return True
         if "initial gap" in low:
-            tracker.update(4, 0.05, "MSA starting")
+            tracker.update(key, 0.05, "MSA starting")
             return True
         if "converged" in low:
-            tracker.update(4, 0.80, "MSA converged")
+            tracker.update(key, 0.80, "MSA converged")
             return True
         if "ue_routes" in low and "wrote" in low:
-            tracker.update(4, 0.80, "guidance complete")
+            tracker.update(key, 0.80, "guidance complete")
             return True
         return False
     # cmd_idx == 1: preference_reaction.py, spans 0.80-1.0
-    return _parse_reaction_line(4, line, tracker, 0.80)
+    return _parse_reaction_line(key, line, tracker, 0.80)
 
 
 def parse_progress_line(key, cmd_idx, line, tracker):
     """Dispatch one captured stdout line to the right parser. `key` is
-    the tracker key (1..6, "5P", "5U"). Keys 6 and "5A" are status-only."""
+    the job's tracker key. Unknown keys are ignored."""
     if tracker is None or not line or not line.strip():
         return
     try:
-        if key == 1:
-            parse_test1_line(line, tracker)
-        elif key in ("5P", "5U"):
-            parse_v9_sweep_line(line, tracker, key, _SWEEP_STATES[key])
-        elif key in (2, 3):
-            parse_test23_line(cmd_idx, line, tracker, key)
-        elif key == 4:
-            parse_test4_line(cmd_idx, line, tracker)
+        kind = JOB_KINDS.get(key)
+        if kind == "v9":
+            state = _SWEEP_STATES.setdefault(key, SweepProgressState(11))
+            parse_v9_sweep_line(line, tracker, key, state)
+        elif kind == "rt":
+            parse_rt_line(cmd_idx, line, tracker, key)
+        elif kind == "ue":
+            parse_ue_line(cmd_idx, line, tracker, key)
     except Exception:
         # Parsing must never break a run; markers are best-effort.
         pass
@@ -509,6 +506,9 @@ def _bar_chars():
 
 _FULL_CH, _EMPTY_CH = _bar_chars()
 
+# Display labels per job key, filled in when jobs are built.
+DISPLAY_LABELS = {}
+
 
 def render_bars(tracker, keys):
     snap = tracker.snapshot()
@@ -520,7 +520,7 @@ def render_bars(tracker, keys):
         bar = _FULL_CH * filled + _EMPTY_CH * (20 - filled)
         if not done and t0 is not None:
             status = "%s (%s)" % (status, fmt_min(time.time() - t0))
-        lines.append("%-22s [%s] %3d%%  %s"
+        lines.append("%-26s [%s] %3d%%  %s"
                      % (DISPLAY_LABELS.get(t, str(t)),
                         bar, pct, status))
     return lines
@@ -555,15 +555,88 @@ def display_loop(tracker, keys, stop_event, interval=2.0):
     except Exception:
         pass
 
+# ----------------------------------------------------------------------
+# Sampling: per-(seed, level) agent file from the pool
+# ----------------------------------------------------------------------
+def sample_level(pool_file, seed, level, out_csv):
+    """Sample exactly `level` agents from the pool into out_csv.
+
+    Calls sample_pool() from sample_agents.py (built by the sampling
+    layer; it must sit next to this file), passing the run seed and the
+    demand level: the sampler derives its per-level RNG from
+    (seed, level), so each level is an independent draw. Tries an
+    import first, then falls back to invoking sample_agents.py as a
+    subprocess with the same arguments as flags. Any failure --
+    missing pool file, missing sampler, wrong row count -- raises
+    RuntimeError with a clear message; the caller treats that as fatal.
+    Nothing here ever falls back to the old unsampled input file.
+    """
+    if not os.path.isfile(pool_file):
+        raise RuntimeError(
+            "pool file not found: %s -- generate/place the pool file "
+            "(see the run README) and rerun; wholerunner will not fall "
+            "back to the old input_agent_initial.csv" % pool_file)
+    os.makedirs(os.path.dirname(out_csv) or ".", exist_ok=True)
+    log("sampling %d agents from %s (seed %d, level %d) -> %s"
+        % (level, os.path.basename(pool_file), seed, level, out_csv))
+    try:
+        if HERE not in sys.path:
+            sys.path.insert(0, HERE)
+        import sample_agents
+    except ImportError:
+        script = os.path.join(HERE, "sample_agents.py")
+        if not os.path.isfile(script):
+            raise RuntimeError(
+                "sampling layer not found: sample_agents.py is missing "
+                "next to wholerunner.py (expected at %s). The sampling "
+                "layer must be delivered before this run can proceed."
+                % script)
+        cmd = [PY, script, "--pool-file", pool_file,
+               "--seed", str(seed), "--n", str(level),
+               "--out", out_csv, "--level", str(level)]
+        rc = subprocess.run(cmd).returncode
+        if rc != 0:
+            raise RuntimeError(
+                "sample_agents.py failed (rc=%d) for seed %d level %d; "
+                "see its output above" % (rc, seed, level))
+    else:
+        try:
+            sample_agents.sample_pool(pool_file, seed, level, out_csv,
+                                      level=level)
+        except Exception as e:
+            raise RuntimeError(
+                "sample_pool() failed for seed %d level %d: %s"
+                % (seed, level, e))
+    if not os.path.isfile(out_csv):
+        raise RuntimeError(
+            "sampler produced no output file for seed %d level %d: %s"
+            % (seed, level, out_csv))
+    n = count_csv_rows(out_csv)
+    if n != level:
+        raise RuntimeError(
+            "sampler produced %d agent rows for level %d (seed %d); "
+            "expected exactly %d" % (n, level, seed, level))
+    log("sampled %d agents (seed %d, level %d)" % (n, seed, level))
+    return out_csv
+
+
+def count_csv_rows(path):
+    """Data-row count of a CSV file (header excluded)."""
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.reader(f))
+    return max(0, len(rows) - 1)
+
 
 # ----------------------------------------------------------------------
 # Sandbox setup (fail-fast: any error here aborts before anything runs)
 # ----------------------------------------------------------------------
-def setup_sandbox(name, data_dir, temp_root, scripts):
+def setup_sandbox(name, data_dir, temp_root, scripts, sample_csv=None):
     """Create temp/run_<pid>/<name>/ with a private DTALite_Files/ copy and
     the job's scripts. `scripts` is a list of (src_dir, filename) tuples;
     src_dir None means next to wholerunner.py, otherwise a subdir of HERE.
-    Raises on any error."""
+    When sample_csv is given, it overwrites the sandbox copy's
+    input_agent_initial.csv -- that is how the per-(seed, level) sample
+    becomes the run's demand. Raises on any error."""
     sandbox = os.path.join(temp_root, name)
     if os.path.isdir(sandbox):
         log("removing stale sandbox %s" % sandbox)
@@ -573,6 +646,12 @@ def setup_sandbox(name, data_dir, temp_root, scripts):
     sandbox_data = os.path.join(sandbox, "DTALite_Files")
     log("%s: copying DTALite_Files -> sandbox ..." % name)
     shutil.copytree(data_dir, sandbox_data)
+
+    if sample_csv is not None:
+        dst = os.path.join(sandbox_data, "input_agent_initial.csv")
+        shutil.copy2(sample_csv, dst)
+        log("%s: injected sampled agents (%s)"
+            % (name, os.path.basename(sample_csv)))
 
     for src_dir, fn in scripts:
         if src_dir:
@@ -596,61 +675,41 @@ def setup_sandbox(name, data_dir, temp_root, scripts):
     return sandbox
 
 
-def scripts_for_test(test):
-    """[(src_dir, filename)] for tests 1-4 from the TESTS registry."""
-    return [(None, fn) for fn in TESTS[test]["scripts"]]
-
-
-def scripts_for_sweep(sub):
-    """[(src_dir, filename)] for Test 5 sub "P"/"U" from its registry entry.
-
-    The optional "script_dirs" map overrides the sub's "script_dir" for
-    individual scripts (None = next to wholerunner.py)."""
-    cfg = TESTS[5]["subs"][sub]
-    default_dir = cfg["script_dir"]
-    per_script = cfg.get("script_dirs", {})
-    return [(per_script.get(fn, default_dir), fn) for fn in cfg["scripts"]]
+def scripts_for(scripts):
+    """[(src_dir, filename)] with src_dir None (next to wholerunner.py)."""
+    return [(None, fn) for fn in scripts]
 
 
 # ----------------------------------------------------------------------
-# Per-test command lines
+# Per-job command lines
 # ----------------------------------------------------------------------
-def test1_commands(sandbox, seed, test1_mode="single", network="siouxfalls",
-                    engine="pysim"):
-    """Test 1 command lines.
-
-    test1_mode="single": bigloop 10 only (100% MPR, the Test 1 case).
-    test1_mode="sweep":  all 11 bigloops (the legacy MPR sweep spelling;
-                         new runs should use --tests 5).
-    """
+def proposed_commands(sandbox, seed, network="siouxfalls", engine="pysim"):
+    """Proposed system: v9 pipeline, bigloop 10 only (100% MPR)."""
     cmd = [PY, os.path.join(sandbox, "runner_parallel.py"),
-           "--seed", str(seed), "--network", network, "--engine", engine]
-    if test1_mode == "single":
-        cmd += ["--bigloops", "10"]
-        desc = "v9 pipeline (runner_parallel.py --bigloops 10)"
-    else:
-        cmd += ["--bigloops", "0-10"]
-        desc = "v9 pipeline (runner_parallel.py --bigloops 0-10, MPR sweep)"
-    return [(cmd, desc)]
+           "--seed", str(seed), "--network", network, "--engine", engine,
+           "--bigloops", "10"]
+    return [(cmd, "v9 pipeline (runner_parallel.py --bigloops 10)")]
 
 
-def test24_commands(test, sandbox, seed, network="siouxfalls", gap_threshold=0.001,
-                      engine="pysim"):
-    """Guidance scenario followed by the preference-reaction step."""
+def scenario_commands(method, sandbox, seed, network="siouxfalls",
+                      gap_threshold=0.001, engine="pysim"):
+    """Guidance scenario followed by the preference-reaction step.
+
+    method is "realtime_1min", "realtime_10min" or "ue"."""
     staging = os.path.join(sandbox, "staging")
     os.makedirs(staging, exist_ok=True)
     data = os.path.join(sandbox, "DTALite_Files")
-    cfg = TESTS[test]
 
-    if test in (2, 3):
+    if method in ("realtime_1min", "realtime_10min"):
+        sigma = 1 if method == "realtime_1min" else 10
         scenario = [PY, os.path.join(sandbox, "scenarios_realtime.py"),
-                    "--sigma", str(cfg["sigma"]),
+                    "--sigma", str(sigma),
                     "--data-dir", data, "--result-dir", staging,
                     "--seed", str(seed), "--network", network,
                     "--engine", engine]
-        scenario_desc = "real-time sigma=%d (guidance)" % cfg["sigma"]
+        scenario_desc = "real-time sigma=%d (guidance)" % sigma
         guidance_csv = os.path.join(staging, "realtime_routes.csv")
-    else:  # test 4
+    else:  # ue
         scenario = [PY, os.path.join(sandbox, "scenarios_ue.py"),
                     "--data-dir", data, "--result-dir", staging,
                     "--seed", str(seed), "--network", network,
@@ -663,30 +722,51 @@ def test24_commands(test, sandbox, seed, network="siouxfalls", gap_threshold=0.0
                 "--guidance-csv", guidance_csv,
                 "--data-dir", data,
                 "--result-dir", staging,
-                "--target-satisfaction", str(cfg["target"]),
+                "--target-satisfaction", str(TARGETS[method]),
                 "--network", network, "--engine", engine]
     return [(scenario, scenario_desc),
             (reaction, "preference reaction")]
 
 
-def test5_commands(sub, sandbox, seed, ue_routes_path=None, network="siouxfalls",
+def sweep_commands(sub, sandbox, seed, bigloops=None, mpr_points=None,
+                   ue_routes_path=None, network="siouxfalls",
                    engine="pysim"):
-    """One [(cmd, desc)] entry per Test 5 sweep. sub is "P" or "U"."""
+    """One [(cmd, desc)] entry per sweep job. sub is "P" (proposed) or
+    "U" (UE-guidance). Exactly one of bigloops / mpr_points is used:
+    bigloops is a list of ints (Test 2 full sweep), mpr_points a list
+    of MPR percentages (Test 3 33/66 points)."""
     if sub == "P":
         cmd = [PY, os.path.join(sandbox, "runner_parallel.py"),
-               "--bigloops", "0-10", "--seed", str(seed),
-               "--network", network, "--engine", engine]
-        desc = "v9 pipeline (runner_parallel.py --bigloops 0-10, proposed MPR sweep)"
+               "--seed", str(seed), "--network", network,
+               "--engine", engine]
+        if mpr_points is not None:
+            cmd += ["--mpr-points", ",".join(str(p) for p in mpr_points)]
+            desc = ("v9 pipeline (runner_parallel.py --mpr-points %s, "
+                    "proposed MPR sweep)"
+                    % ",".join(str(p) for p in mpr_points))
+        else:
+            cmd += ["--bigloops", ",".join(str(b) for b in bigloops)]
+            desc = ("v9 pipeline (runner_parallel.py --bigloops %s, "
+                    "proposed MPR sweep)"
+                    % ",".join(str(b) for b in bigloops))
     else:
         if not ue_routes_path:
             raise ValueError("ue_routes_path is required for the UE-guidance sweep")
         cmd = [PY, os.path.join(sandbox, "runner_parallel_ue.py"),
                "--ue-routes", ue_routes_path,
-               "--bigloops", "1-10", "--seed", str(seed),
-               "--network", network, "--engine", engine]
-        desc = "UE-guidance MPR sweep (runner_parallel_ue.py --bigloops 1-10)"
+               "--seed", str(seed), "--network", network,
+               "--engine", engine]
+        if mpr_points is not None:
+            cmd += ["--mpr-points", ",".join(str(p) for p in mpr_points)]
+            desc = ("UE-guidance MPR sweep (runner_parallel_ue.py "
+                    "--mpr-points %s)"
+                    % ",".join(str(p) for p in mpr_points))
+        else:
+            cmd += ["--bigloops", ",".join(str(b) for b in bigloops)]
+            desc = ("UE-guidance MPR sweep (runner_parallel_ue.py "
+                    "--bigloops %s)"
+                    % ",".join(str(b) for b in bigloops))
     return [(cmd, desc)]
-
 
 # ----------------------------------------------------------------------
 # Execution (shared Popen engine; one thread per job)
@@ -701,8 +781,8 @@ def test5_commands(sub, sandbox, seed, ue_routes_path=None, network="siouxfalls"
 #
 # Two timeouts guarantee forward progress:
 #   _RUN_STALL_S: no new output for this long -> kill the process tree and
-#                 mark the job failed. (Tests 1-5 all print tqdm/line
-#                 progress every few seconds in normal operation.)
+#                 mark the job failed. (All jobs print tqdm/line progress
+#                 every few seconds in normal operation.)
 #   _RUN_ABS_S:   absolute backstop per _run_commands call.
 _RUN_POLL_S = 2.0
 _RUN_STALL_S = 30 * 60  # overridden by --stall-timeout-min in main()
@@ -731,7 +811,7 @@ def _kill_proc_tree(proc):
 
 
 def _poll_process(label, key, cmd_idx, proc, log_path, parse_line,
-                tracker=None):
+                  tracker=None):
     """Poll log_path for new output lines and proc for exit.
 
     Returns (returncode, killed, kill_reason). `killed` is True when the
@@ -745,7 +825,7 @@ def _poll_process(label, key, cmd_idx, proc, log_path, parse_line,
     pos = 0  # header lines ("### ...") match no progress regex; harmless
     last_out = time.monotonic()
     last_progress = time.monotonic()
-    # Track the fraction to detect actual progress (not just bytes)
+
     def _get_frac():
         if tracker is None:
             return None
@@ -756,6 +836,7 @@ def _poll_process(label, key, cmd_idx, proc, log_path, parse_line,
         except Exception:
             pass
         return None
+
     last_frac = _get_frac()
     abs_deadline = last_out + _RUN_ABS_S
     killed = False
@@ -891,192 +972,18 @@ def _run_commands(label, sandbox, cmds, tracker, key, parse_line):
         log("%s: finished (%s)" % (label, fmt_min(dt)))
     return True, dt
 
-def run_test(test, sandbox, tracker=None, seed=42, test1_mode="single",
-           network="siouxfalls", gap_threshold=0.001, engine="pysim"):
-    """Run one test's command sequence inside its sandbox. Returns
-    (ok, elapsed)."""
-    cfg = TESTS[test]
-    if test == 1:
-        cmds = test1_commands(sandbox, seed, test1_mode, network, engine)
-    else:
-        cmds = test24_commands(test, sandbox, seed, network, gap_threshold,
-                               engine)
-    return _run_commands(cfg["label"], sandbox, cmds, tracker, test,
-                         lambda i, line: parse_progress_line(test, i, line, tracker))
 
-
-def run_sweep(sub, sandbox, tracker, seed, ue_routes_path=None,
-            network="siouxfalls", engine="pysim"):
-    """Run one Test 5 sweep (sub "P"/"U"). Returns (ok, elapsed)."""
-    key = "5" + sub
-    label = "Test 5 (%s)" % TESTS[5]["subs"][sub]["label"]
-    cmds = test5_commands(sub, sandbox, seed, ue_routes_path, network,
-                          engine)
-    return _run_commands(label, sandbox, cmds, tracker, key,
-                         lambda i, line: parse_progress_line(key, i, line, tracker))
-
+def run_job(job, sandbox, tracker, args):
+    """Run one job's command sequence inside its sandbox. Returns
+    (ok, elapsed). `job` is a job dict built by build_jobs()."""
+    cmds = job["commands"](sandbox, args)
+    key = job["key"]
+    return _run_commands(job["label"], sandbox, cmds, tracker, key,
+                         lambda i, line: parse_progress_line(key, i, line,
+                                                            tracker))
 
 # ----------------------------------------------------------------------
-# Result collection
-# ----------------------------------------------------------------------
-def _collect_engine_log(sandbox, out_dir):
-    """Copy the sandbox's engine_calls.log (PySim audit trail) into the
-    results, when one exists. Under --engine dtalite there is no such
-    file and this is a no-op."""
-    src = os.path.join(sandbox, "engine_calls.log")
-    if os.path.isfile(src):
-        os.makedirs(out_dir, exist_ok=True)
-        shutil.copy2(src, os.path.join(out_dir, "engine_calls.log"))
-
-
-def collect_234(test, sandbox, results_root):
-    """Copy staging summaries/routes, predicted_LinkMOE.csv and
-    output_*.csv for Tests 2-4."""
-    name = RESULT_DIR_NAMES[test]
-    out = os.path.join(results_root, name)
-    staging = os.path.join(sandbox, "staging")
-    data = os.path.join(sandbox, "DTALite_Files")
-
-    os.makedirs(out, exist_ok=True)
-    copied = []
-    # predicted_LinkMOE.csv is written into staging by scenarios_realtime.py
-    # and scenarios_ue.py; it feeds Test 6.
-    for pat in ("*_summary.txt", "*_routes.csv", "predicted_LinkMOE.csv"):
-        for src in sorted(glob.glob(os.path.join(staging, pat))):
-            dst = os.path.join(out, os.path.basename(src))
-            shutil.copy2(src, dst)
-            copied.append(os.path.basename(src))
-
-    full = os.path.join(out, "full_results")
-    os.makedirs(full, exist_ok=True)
-    n_csv = 0
-    for src in sorted(glob.glob(os.path.join(data, "output_*.csv"))):
-        shutil.copy2(src, os.path.join(full, os.path.basename(src)))
-        n_csv += 1
-    _collect_engine_log(sandbox, out)
-    log("test %d: collected %d files -> %s, %d output_*.csv -> full_results/"
-        % (test, len(copied), out, n_csv))
-
-
-def collect_1(sandbox, results_root):
-    """Copy Test 1 bigloop result CSVs and generate proposed_summary.txt.
-    In sweep mode the same "last bigloop only" behavior is kept here; the
-    full per-bigloop sweep collection is collect_5's job."""
-    out = os.path.join(results_root, "test1")
-    full = os.path.join(out, "full_results")
-    os.makedirs(full, exist_ok=True)
-    data = os.path.join(sandbox, "DTALite_Files")
-
-    n = find_last_bigloop(data)
-    if n is None:
-        raise RuntimeError(
-            "test 1: no completed bigloop files found in %s" % data)
-    copied = []
-    for tag in T1_TAGS:
-        for kind in T1_KINDS:
-            fn = "%d%s_%s.csv" % (n, tag, kind)
-            src = os.path.join(data, fn)
-            if os.path.isfile(src):
-                shutil.copy2(src, os.path.join(full, fn))
-                copied.append(fn)
-            else:
-                log("test 1: warning: expected file missing: %s" % fn)
-    log("test 1: collected %d bigloop-%d CSVs -> %s" % (len(copied), n, full))
-
-    summary_path = os.path.join(out, "proposed_summary.txt")
-    generate_proposed_summary(n, full, summary_path)
-    _collect_engine_log(sandbox, out)
-    log("test 1: wrote %s" % summary_path)
-
-
-def collect_5(sub, sandbox, results_root):
-    """Copy per-bigloop result CSVs for a Test 5 sweep.
-
-    sub="P": bigloops 0..10 -> results/test5/proposed_sweep/bigloop_{n}/
-    sub="U": bigloops 1..10 -> results/test5/ue_sweep/bigloop_{n}/
-    For each bigloop with BOTH {n}actual_agent.csv and {n}UOinfor_agent.csv
-    present, copy the 9 CSVs {n}{UOinfor,predict,actual}_{agent,LinkMOE,
-    LinkTDMOE}.csv. Missing/incomplete bigloops are skipped with a warning
-    (mpr_aggregate.py notes them in mpr_summary.txt). Returns the list of
-    bigloops actually collected.
-    """
-    sweep_name = "proposed_sweep" if sub == "P" else "ue_sweep"
-    lo = 0 if sub == "P" else 1
-    data = os.path.join(sandbox, "DTALite_Files")
-    collected = []
-    for n in range(lo, 11):
-        f_act = os.path.join(data, "%dactual_agent.csv" % n)
-        f_uo = os.path.join(data, "%dUOinfor_agent.csv" % n)
-        if not (os.path.isfile(f_act) and os.path.isfile(f_uo)):
-            log("test 5%s: warning: bigloop %d missing actual/UOinfor agent "
-                "files -- skipped" % (sub, n))
-            continue
-        out = os.path.join(results_root, "test5", sweep_name, "bigloop_%d" % n)
-        os.makedirs(out, exist_ok=True)
-        copied = 0
-        for tag in T1_TAGS:
-            for kind in T1_KINDS:
-                fn = "%d%s_%s.csv" % (n, tag, kind)
-                src = os.path.join(data, fn)
-                if os.path.isfile(src):
-                    shutil.copy2(src, os.path.join(out, fn))
-                    copied += 1
-                else:
-                    log("test 5%s: warning: expected file missing: %s"
-                        % (sub, fn))
-        log("test 5%s: bigloop %d -> %s (%d files)"
-            % (sub, n, out, copied))
-        collected.append(n)
-    log("test 5%s: collected %d/%d bigloops"
-        % (sub, len(collected), 11 - lo))
-    _collect_engine_log(
-        sandbox, os.path.join(results_root, "test5", sweep_name))
-    return collected
-
-
-def run_aggregation(results_root, seed, tracker=None):
-    """Run mpr_aggregate.py in-place on the collected sweeps (no sandbox).
-
-    NOTE the flag is --input-dir (not --proposed-dir). Writes mpr_table5.csv,
-    mpr_table6.csv and mpr_summary.txt into results/test5/. Returns
-    (ok, elapsed). Raises RuntimeError if there is nothing to aggregate.
-    """
-    sweep_dir = os.path.join(results_root, "test5", "proposed_sweep")
-    ue_dir = os.path.join(results_root, "test5", "ue_sweep")
-    out_dir = os.path.join(results_root, "test5")
-    os.makedirs(out_dir, exist_ok=True)
-    if not glob.glob(os.path.join(sweep_dir, "bigloop_*")):
-        raise RuntimeError(
-            "Test 5: nothing to aggregate (no bigloop dirs in %s)"
-            % sweep_dir)
-    cmd = [PY, os.path.join(HERE, "mpr_aggregate.py"),
-           "--input-dir", sweep_dir,
-           "--ue-dir", ue_dir,
-           "--seed", str(seed),
-           "--output-dir", out_dir]
-    if tracker:
-        tracker.start("5A")
-        tracker.update("5A", None, "aggregating...")
-    log("Test 5: aggregating MPR sweep (mpr_aggregate.py) ...")
-    t0 = time.time()
-    try:
-        rc = subprocess.run(cmd, timeout=4*3600).returncode
-    except subprocess.TimeoutExpired:
-        log("ERROR: mpr_aggregate.py timed out after 4h; marking aggregation failed")
-        if tracker:
-            tracker.finish("5A", False)
-        return False, time.time() - t0
-    dt = time.time() - t0
-    ok = rc == 0
-    if tracker:
-        tracker.finish("5A", ok)
-    log("Test 5: aggregation %s (%s)" % ("done" if ok else "FAILED",
-                                        fmt_min(dt)))
-    return ok, dt
-
-
-# ----------------------------------------------------------------------
-# Test 1 summary (analysis logic carried over from runner_bingrong.py)
+# Metrics (formulas reused from the established scripts, not reinvented)
 # ----------------------------------------------------------------------
 def find_last_bigloop(d):
     """Last bigloop number with both actual and UOinfor agent files."""
@@ -1158,9 +1065,20 @@ def sum_travel_minutes(path):
     return total, n
 
 
+def proposed_metrics(f_uo, f_ac):
+    """(satisfaction_pct, veh_hrs) for a Proposed run from its UOinfor
+    and actual agent files."""
+    actual = read_agent_paths(f_ac)
+    uo = read_agent_paths(f_uo)
+    n_sat, n_common, rate = satisfaction(actual, uo)
+    tot_min, _n_tt = sum_travel_minutes(f_ac)
+    return 100.0 * rate, tot_min / 60.0
+
+
 def generate_proposed_summary(bigloop, full_output_dir, summary_path):
     """Write proposed_summary.txt mirroring the baseline format:
-    satisfaction vs Bingrong's 88.64% and vehicle-hours vs 24,719.3."""
+    satisfaction vs Bingrong's 88.64% and vehicle-hours vs 24,719.3.
+    Returns (satisfaction_pct, veh_hrs) for the summary.csv row."""
     f_uo = os.path.join(full_output_dir, "%dUOinfor_agent.csv" % bigloop)
     f_ac = os.path.join(full_output_dir, "%dactual_agent.csv" % bigloop)
     if not os.path.isfile(f_uo):
@@ -1193,100 +1111,652 @@ def generate_proposed_summary(bigloop, full_output_dir, summary_path):
         f.write("per-agent: %.2f min/agent\n" % per_agent)
         f.write("Bingrong target: %.1f veh-hrs (%.2f min/agent)\n"
                 % (T1_VEH_HRS, T1_MIN_PER_AGENT))
+    return rate_pct, veh_hrs
+
+
+_SAT_RE = re.compile(r"satisfaction:\s*\d+\s*/\s*\d+\s*=\s*([0-9.]+)%")
+_VH_RE = re.compile(r"vehicle-hours \(actual run\):\s*([0-9.]+)")
+
+
+def parse_reaction_summary(path):
+    """(satisfaction_pct, veh_hrs) from a reaction_summary.txt, or
+    (None, None) when the file or the lines are missing."""
+    if not os.path.isfile(path):
+        return None, None
+    sat = None
+    veh = None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = _SAT_RE.search(line)
+            if m:
+                try:
+                    sat = float(m.group(1))
+                except ValueError:
+                    pass
+            m = _VH_RE.search(line)
+            if m:
+                try:
+                    veh = float(m.group(1))
+                except ValueError:
+                    pass
+    return sat, veh
+
+
+def compute_linkmoe_metrics(path):
+    """Delay and congestion from one realized output_LinkMOE.csv.
+
+    Delay (veh-hrs) = sum over links of
+        (travel_time - free-flow_travel_time) * total_link_volume / 60
+    (linkmoe_delay.py). V/C = total_link_volume /
+    link_capacity_in_vhc_per_hour (congestion_metric.md); max V/C is the
+    peak, p95 V/C the 95th-percentile link (same index rule as
+    compute_congestion.py: sorted values, index int(0.95 * n)),
+    over_cap counts V/C > 1.0, heavy counts V/C > 0.8.
+    Returns a dict with None values when the file or columns are absent.
+    """
+    out = {"delay": None, "max_vc": None, "p95_vc": None,
+           "over_cap": None, "heavy": None}
+    if not os.path.isfile(path):
+        return out
+    total = 0.0
+    vcs = []
+    n = 0
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        cols = norm_headers(reader.fieldnames or [])
+        need = ("travel_time", "free-flow_travel_time",
+                "total_link_volume", "link_capacity_in_vhc_per_hour")
+        if any(k not in cols for k in need):
+            return out
+        tt_c, fft_c, vol_c, cap_c = (cols[k] for k in need)
+        for row in reader:
+            try:
+                tt = float(row[tt_c])
+                fft = float(row[fft_c])
+                vol = float(row[vol_c])
+                cap = float(row[cap_c])
+            except (TypeError, ValueError):
+                continue
+            if not (tt == tt and fft == fft and vol == vol
+                    and cap == cap):
+                continue
+            total += (tt - fft) * vol
+            n += 1
+            if cap > 0:
+                vcs.append(vol / cap)
+    if n == 0:
+        return out
+    out["delay"] = total / 60.0
+    if vcs:
+        vcs.sort()
+        out["max_vc"] = vcs[-1]
+        out["p95_vc"] = vcs[min(int(0.95 * len(vcs)), len(vcs) - 1)]
+        out["over_cap"] = sum(1 for v in vcs if v > 1.0)
+        out["heavy"] = sum(1 for v in vcs if v > 0.8)
+    return out
+
+
+# Emission column sums: identical definitions to table4_emissions.py /
+# mpr_aggregate.py SUST_SPECS (agent-file sums; no correction factor).
+# (metric, candidate canonical column names, divisor to table unit)
+SUST_SPECS = [
+    ("energy", ("totalenergykj", "energykj", "energyinkj"), 1e9),
+    ("co2", ("co2g",), 1e6),
+    ("nox", ("noxg",), 1e3),
+    ("co", ("cog",), 1e3),
+    ("hc", ("hcg",), 1e3),
+]
+
+
+def _canon_col(col):
+    return re.sub(r"[^a-z0-9]", "", col.strip().lower())
+
+
+def sum_emissions(path):
+    """Sum per-agent emission columns in one agent file.
+
+    Returns a dict metric -> float in table units (energy 10^9 KJ, CO2
+    ton, NOX/CO/HC kg), or None per metric when the column is absent.
+    A present-but-zero column sums to 0.0, not None. Returns all-None
+    when the file is missing."""
+    out = {name: None for name, _c, _d in SUST_SPECS}
+    if not os.path.isfile(path):
+        return out
+    totals = {name: 0.0 for name, _c, _d in SUST_SPECS}
+    found = {name: False for name, _c, _d in SUST_SPECS}
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        cols = {}
+        for c in (reader.fieldnames or []):
+            if c and c.strip():
+                cols.setdefault(_canon_col(c), c)
+        use = {}
+        for name, cands, _div in SUST_SPECS:
+            for cand in cands:
+                if cand in cols:
+                    use[name] = cols[cand]
+                    break
+        if not use:
+            return out
+        for row in reader:
+            for name, col in use.items():
+                try:
+                    v = float(row[col])
+                except (TypeError, ValueError):
+                    continue
+                if v == v:  # not NaN
+                    totals[name] += v
+                    found[name] = True
+    for name, _c, div in SUST_SPECS:
+        if name in use:
+            out[name] = totals[name] / div
+    return out
+
+
+def _load_link_volumes(path):
+    """{(from_node, to_node): volume} from a LinkMOE CSV. Keeps the
+    FIRST occurrence of each duplicated header (DTALite trailing-comma
+    quirk); mirrors volume_estimation.load_link_volumes."""
+    volumes = {}
+    with open(path, "r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        col = {}
+        for row in reader:
+            if not col:
+                for i, name in enumerate(row):
+                    norm = name.strip().lower()
+                    if norm and norm not in col:
+                        col[norm] = i
+                missing = [c for c in ("from_node_id", "to_node_id",
+                                       "total_link_volume")
+                           if c not in col]
+                if missing:
+                    raise ValueError(
+                        "%s: missing required column(s): %s"
+                        % (path, ", ".join(missing)))
+                continue
+            if not row or not any(cell.strip() for cell in row):
+                continue
+            try:
+                from_node = row[col["from_node_id"]].strip()
+                to_node = row[col["to_node_id"]].strip()
+                volume = float(row[col["total_link_volume"]].strip())
+            except (IndexError, ValueError):
+                continue
+            if from_node and to_node:
+                volumes[(from_node, to_node)] = volume
+    return volumes
+
+
+def linkvol_accuracy(predict_path, actual_path):
+    """Link-volume accuracy: 100 * (#links with |pred-act|/|act|*100 < 10)
+    / (#links with nonzero actual volume). Same binning rule as
+    volume_estimation.analyze_pair (its "<10%" bin). Returns None when
+    either file is missing or no comparable link has nonzero volume."""
+    if not os.path.isfile(predict_path) or not os.path.isfile(actual_path):
+        return None
+    try:
+        predicted = _load_link_volumes(predict_path)
+        actual = _load_link_volumes(actual_path)
+    except (ValueError, OSError):
+        return None
+    common = set(predicted) & set(actual)
+    denom = 0
+    within = 0
+    for key in common:
+        act = actual[key]
+        if act == 0.0:
+            continue
+        denom += 1
+        if abs(predicted[key] - act) / abs(act) * 100.0 < 10.0:
+            within += 1
+    if denom == 0:
+        return None
+    return 100.0 * within / denom
 
 
 # ----------------------------------------------------------------------
-# Test 5 ue_routes dependency
+# Per-seed master summary (summary.csv)
 # ----------------------------------------------------------------------
+def _fmt_metric(name, value):
+    """Format one metric value for summary.csv; None -> empty string."""
+    if value is None:
+        return ""
+    if name in ("over_cap", "heavy"):
+        return str(int(value))
+    if name in ("co2", "nox", "co", "hc"):
+        return "%.1f" % value
+    if name in ("max_vc", "p95_vc"):
+        return "%.3f" % value
+    return "%.2f" % value
+
+
+def append_summary_row(results_root, seed, test, level, method, mpr,
+                       metrics):
+    """Append one row to <results_root>/summary.csv, creating it with
+    the pinned SUMMARY_COLUMNS header when it does not exist yet.
+    metrics maps metric name -> value (None = empty cell)."""
+    path = os.path.join(results_root, "summary.csv")
+    exists = os.path.isfile(path)
+    os.makedirs(results_root, exist_ok=True)
+    row = {"seed": seed, "test": test, "level": level,
+           "method": method,
+           "mpr": "" if mpr is None else str(mpr)}
+    for name in ("satisfaction", "veh_hrs", "delay", "energy", "co2",
+                 "nox", "co", "hc", "linkvol_acc", "max_vc", "p95_vc",
+                 "over_cap", "heavy"):
+        row[name] = _fmt_metric(name, metrics.get(name))
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_COLUMNS,
+                                extrasaction="ignore")
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
+    return path
+
+
+def collect_metrics(agent_path, linkmoe_path, uo_path=None,
+                    predict_linkmoe_path=None, sat_veh=None):
+    """Assemble the metrics dict for one summary.csv row.
+
+    agent_path: actual-run agent file (emissions + veh_hrs fallback).
+    linkmoe_path: realized LinkMOE file (delay + congestion).
+    uo_path: UOinfor agent file (Proposed runs: satisfaction computed
+      directly from UOinfor vs actual paths).
+    predict_linkmoe_path: predicted LinkMOE file (link-volume accuracy).
+    sat_veh: (satisfaction_pct, veh_hrs) from a reaction summary, used
+      when uo_path is None (scenario jobs).
+    Missing pieces stay None (empty cells), never fabricated."""
+    metrics = {"satisfaction": None, "veh_hrs": None, "delay": None,
+               "energy": None, "co2": None, "nox": None, "co": None,
+               "hc": None, "linkvol_acc": None, "max_vc": None,
+               "p95_vc": None, "over_cap": None, "heavy": None}
+    if uo_path is not None and os.path.isfile(uo_path) \
+            and os.path.isfile(agent_path):
+        try:
+            sat, veh = proposed_metrics(uo_path, agent_path)
+            metrics["satisfaction"] = sat
+            metrics["veh_hrs"] = veh
+        except (ValueError, OSError) as e:
+            log("WARNING: could not compute Proposed metrics from %s: %s"
+                % (agent_path, e))
+    elif sat_veh is not None:
+        sat, veh = sat_veh
+        metrics["satisfaction"] = sat
+        if veh is None and os.path.isfile(agent_path):
+            try:
+                tot_min, _n = sum_travel_minutes(agent_path)
+                metrics["veh_hrs"] = tot_min / 60.0
+            except (ValueError, OSError):
+                pass
+        else:
+            metrics["veh_hrs"] = veh
+    elif os.path.isfile(agent_path):
+        try:
+            tot_min, _n = sum_travel_minutes(agent_path)
+            metrics["veh_hrs"] = tot_min / 60.0
+        except (ValueError, OSError):
+            pass
+    if os.path.isfile(agent_path):
+        metrics.update(sum_emissions(agent_path))
+    if linkmoe_path is not None:
+        metrics.update(compute_linkmoe_metrics(linkmoe_path))
+    if predict_linkmoe_path is not None and linkmoe_path is not None:
+        metrics["linkvol_acc"] = linkvol_accuracy(predict_linkmoe_path,
+                                                  linkmoe_path)
+    return metrics
+
 # ----------------------------------------------------------------------
-# Test 6: future-condition volume estimation (smart mode)
+# Result collection (one function per job kind; each also appends the
+# job's summary.csv row(s))
+# ----------------------------------------------------------------------
+def _collect_engine_log(sandbox, out_dir):
+    """Copy the sandbox's engine_calls.log (PySim audit trail) into the
+    results, when one exists. Under --engine dtalite there is no such
+    file and this is a no-op."""
+    src = os.path.join(sandbox, "engine_calls.log")
+    if os.path.isfile(src):
+        os.makedirs(out_dir, exist_ok=True)
+        shutil.copy2(src, os.path.join(out_dir, "engine_calls.log"))
+
+
+def collect_proposed(job, sandbox, results_root, seed):
+    """Copy one Proposed job's bigloop result CSVs, write its summary
+    file, and append its summary.csv row. Returns the bigloop number."""
+    out = job["out_dir"]
+    full = os.path.join(out, "full_results")
+    os.makedirs(full, exist_ok=True)
+    data = os.path.join(sandbox, "DTALite_Files")
+
+    n = find_last_bigloop(data)
+    if n is None:
+        raise RuntimeError(
+            "%s: no completed bigloop files found in %s"
+            % (job["key"], data))
+    copied = []
+    for tag in T1_TAGS:
+        for kind in T1_KINDS:
+            fn = "%d%s_%s.csv" % (n, tag, kind)
+            src = os.path.join(data, fn)
+            if os.path.isfile(src):
+                shutil.copy2(src, os.path.join(full, fn))
+                copied.append(fn)
+            else:
+                log("%s: warning: expected file missing: %s"
+                    % (job["key"], fn))
+    log("%s: collected %d bigloop-%d CSVs -> %s"
+        % (job["key"], len(copied), n, full))
+
+    summary_path = os.path.join(out, "proposed_summary.txt")
+    generate_proposed_summary(n, full, summary_path)
+    _collect_engine_log(sandbox, out)
+    log("%s: wrote %s" % (job["key"], summary_path))
+
+    metrics = collect_metrics(
+        os.path.join(full, "%dactual_agent.csv" % n),
+        os.path.join(full, "%dactual_LinkMOE.csv" % n),
+        uo_path=os.path.join(full, "%dUOinfor_agent.csv" % n),
+        predict_linkmoe_path=os.path.join(
+            full, "%dpredict_LinkMOE.csv" % n))
+    append_summary_row(results_root, seed, job["test"], job["level"],
+                       "proposed", None, metrics)
+    return n
+
+
+def collect_scenario(job, sandbox, results_root, seed):
+    """Copy a scenario job's staging summaries/routes, predicted_LinkMOE
+    and output_*.csv, and append its summary.csv row."""
+    out = job["out_dir"]
+    staging = os.path.join(sandbox, "staging")
+    data = os.path.join(sandbox, "DTALite_Files")
+
+    os.makedirs(out, exist_ok=True)
+    copied = []
+    # predicted_LinkMOE.csv is written into staging by scenarios_realtime.py
+    # and scenarios_ue.py; it feeds Test 4 and the per-level accuracy.
+    for pat in ("*_summary.txt", "*_routes.csv", "predicted_LinkMOE.csv"):
+        for src in sorted(glob.glob(os.path.join(staging, pat))):
+            dst = os.path.join(out, os.path.basename(src))
+            shutil.copy2(src, dst)
+            copied.append(os.path.basename(src))
+
+    full = os.path.join(out, "full_results")
+    os.makedirs(full, exist_ok=True)
+    n_csv = 0
+    for src in sorted(glob.glob(os.path.join(data, "output_*.csv"))):
+        shutil.copy2(src, os.path.join(full, os.path.basename(src)))
+        n_csv += 1
+    _collect_engine_log(sandbox, out)
+    log("%s: collected %d files -> %s, %d output_*.csv -> full_results/"
+        % (job["key"], len(copied), out, n_csv))
+
+    sat_veh = parse_reaction_summary(
+        os.path.join(out, "reaction_summary.txt"))
+    metrics = collect_metrics(
+        os.path.join(full, "output_agent.csv"),
+        os.path.join(full, "output_LinkMOE.csv"),
+        predict_linkmoe_path=os.path.join(out, "predicted_LinkMOE.csv"),
+        sat_veh=sat_veh)
+    append_summary_row(results_root, seed, job["test"], job["level"],
+                       job["method"], None, metrics)
+
+
+def collect_sweep(job, sub, sandbox, results_root, seed):
+    """Copy per-bigloop result CSVs for a sweep job and append one
+    summary.csv row per bigloop.
+
+    job["bigloops"] is a list of (bigloop, mpr) pairs: Test 2 uses
+    bigloops 0..10 (proposed) / 1..10 (UE) with mpr = bigloop * 10
+    (bigloop 0 is the nominal 0% point); Test 3 uses bigloops 33/66
+    with mpr 33/66. For each bigloop with BOTH {n}actual_agent.csv and
+    {n}UOinfor_agent.csv present, copy the 9 CSVs. Missing/incomplete
+    bigloops are skipped with a warning, and a short sweep raises
+    RuntimeError (a missing sweep point is a failed test, never
+    a silent OK). Returns the list of bigloops actually collected.
+    """
+    sweep_name = "proposed_sweep" if sub == "P" else "ue_sweep"
+    method = "proposed" if sub == "P" else "ue"
+    data = os.path.join(sandbox, "DTALite_Files")
+    collected = []
+    for n, mpr in job["bigloops"]:
+        f_act = os.path.join(data, "%dactual_agent.csv" % n)
+        f_uo = os.path.join(data, "%dUOinfor_agent.csv" % n)
+        if not (os.path.isfile(f_act) and os.path.isfile(f_uo)):
+            log("%s: warning: bigloop %d missing actual/UOinfor agent "
+                "files -- skipped" % (job["key"], n))
+            continue
+        out = os.path.join(job["out_dir"], "bigloop_%d" % n)
+        os.makedirs(out, exist_ok=True)
+        copied = 0
+        for tag in T1_TAGS:
+            for kind in T1_KINDS:
+                fn = "%d%s_%s.csv" % (n, tag, kind)
+                src = os.path.join(data, fn)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(out, fn))
+                    copied += 1
+                else:
+                    log("%s: warning: expected file missing: %s"
+                        % (job["key"], fn))
+        log("%s: bigloop %d (mpr %d%%) -> %s (%d files)"
+            % (job["key"], n, mpr, out, copied))
+        metrics = collect_metrics(
+            os.path.join(out, "%dactual_agent.csv" % n),
+            os.path.join(out, "%dactual_LinkMOE.csv" % n),
+            uo_path=os.path.join(out, "%dUOinfor_agent.csv" % n),
+            predict_linkmoe_path=os.path.join(
+                out, "%dpredict_LinkMOE.csv" % n))
+        append_summary_row(results_root, seed, job["test"], job["level"],
+                           method, mpr, metrics)
+        collected.append(n)
+    log("%s: collected %d/%d bigloops"
+        % (job["key"], len(collected), len(job["bigloops"])))
+    _collect_engine_log(sandbox, job["out_dir"])
+    if len(collected) < len(job["bigloops"]):
+        _missing = [n for n, _m in job["bigloops"]
+                    if n not in collected]
+        raise RuntimeError(
+            "%s: sweep incomplete: collected %d/%d bigloops, "
+            "missing %s"
+            % (job["key"], len(collected), len(job["bigloops"]),
+               _missing))
+    return collected
+
+
+# ----------------------------------------------------------------------
+# Test 4: link-volume validation (old Test 6) at the 50k baseline
 # ----------------------------------------------------------------------
 def _proposed_pair_exists(d):
     """True if some filename prefix in d has BOTH *predict_LinkMOE.csv and
     *actual_LinkMOE.csv. Mirrors volume_estimation.find_proposed_pair."""
     preds = set()
-    for path in glob.glob(os.path.join(d, "*" + T6_PREDICT_SUFFIX)):
-        preds.add(os.path.basename(path)[:-len(T6_PREDICT_SUFFIX)])
+    for path in glob.glob(os.path.join(d, "*" + T4_PREDICT_SUFFIX)):
+        preds.add(os.path.basename(path)[:-len(T4_PREDICT_SUFFIX)])
     acts = set()
-    for path in glob.glob(os.path.join(d, "*" + T6_ACTUAL_SUFFIX)):
-        acts.add(os.path.basename(path)[:-len(T6_ACTUAL_SUFFIX)])
+    for path in glob.glob(os.path.join(d, "*" + T4_ACTUAL_SUFFIX)):
+        acts.add(os.path.basename(path)[:-len(T4_ACTUAL_SUFFIX)])
     return bool(preds & acts)
 
 
-def _scenario_actual_path(t, results_root):
-    """First existing actual-LinkMOE candidate for Test t (2-4), or None.
-
-    Mirrors volume_estimation.SCENARIO_ACTUAL_CANDIDATES: collect_234()
-    copies the reaction run's output_LinkMOE.csv into
-    testN/full_results/; the bare testN/output_LinkMOE.csv fallback
-    covers hand-assembled results dirs."""
-    test_dir = os.path.join(results_root, "test%d" % t)
-    for cand in ("full_results/output_LinkMOE.csv", "output_LinkMOE.csv"):
-        p = os.path.join(test_dir, cand)
-        if os.path.isfile(p):
-            return p
-    return None
+def _scenario_pair_exists(method_dir):
+    """True if a scenario method dir has both predicted_LinkMOE.csv and
+    the reaction run's actual LinkMOE file."""
+    pred = os.path.join(method_dir, "predicted_LinkMOE.csv")
+    act = os.path.join(method_dir, "full_results", "output_LinkMOE.csv")
+    return os.path.isfile(pred) and os.path.isfile(act)
 
 
-def results_exist(t, results_root):
-    """True if Test t's results are present and usable by
-    volume_estimation. Test 1 needs a predict/actual LinkMOE pair (the
-    hard requirement for Figure 8); tests 2-4 each need BOTH
-    predicted_LinkMOE.csv AND the reaction run's actual LinkMOE file.
-    A test with only the predicted file counts as missing here, so
-    Test 6 smart mode reruns it as a prerequisite instead of passing a
-    half-usable system to volume_estimation (which would skip it)."""
-    if t == 1:
-        d = os.path.join(results_root, "test1", "full_results")
-        if not os.path.isdir(d):
+def test1_results_exist(results_root):
+    """True if Test 1's four systems all have complete predicted/actual
+    LinkMOE pairs under results/test1/ -- i.e. Test 4 can run without
+    rerunning Test 1."""
+    base = os.path.join(results_root, "test1")
+    if not _proposed_pair_exists(os.path.join(base, "proposed",
+                                              "full_results")):
+        return False
+    for m in ("rt1", "rt10", "ue"):
+        if not _scenario_pair_exists(os.path.join(base, m)):
             return False
-        return _proposed_pair_exists(d)
-    if t in (2, 3, 4):
-        return (os.path.isfile(os.path.join(
-                    results_root, "test%d" % t, "predicted_LinkMOE.csv"))
-                and _scenario_actual_path(t, results_root) is not None)
-    return False
+    return True
 
 
-def run_test6(results_root, tracker=None):
-    """Run volume_estimation.py in-place (no sandbox; read-only analysis).
-    Analyzes whichever of Tests 1-4 have complete predicted/actual
-    pairs (see results_exist). Returns (ok, elapsed). Raises
-    RuntimeError if none do."""
-    systems = ["test%d" % t for t in (1, 2, 3, 4)
-               if results_exist(t, results_root)]
-    if not systems:
-        raise RuntimeError("Test 6: no usable results for tests 1-4 under %s"
-                           % results_root)
-    cmd = [PY, os.path.join(HERE, "volume_estimation.py"),
-           "--results-dir", results_root,
-           "--output-dir", os.path.join(results_root, "test6"),
-           "--systems", ",".join(systems)]
-    if tracker:
-        tracker.start(6)
-        tracker.update(6, None, "running volume estimation...")
-    log("Test 6: estimating future-condition volumes (%s) ..."
-        % ",".join(systems))
-    t0 = time.time()
-    # Fast and deterministic; no progress markers to parse, so inherit
-    # the console instead of capturing.
+def run_test4(results_root, seed, tracker=None):
+    """Run volume_estimation.py over Test 1's four systems (Test 4).
+
+    volume_estimation.py still expects the old test1..test4 layout, so
+    this builds a small compatibility view (copies of the LinkMOE files
+    only -- the files are 76 links each) mapping the new layout onto
+    it: view/test1/full_results <- test1/proposed/full_results,
+    view/test2 <- test1/rt1, view/test3 <- test1/rt10,
+    view/test4 <- test1/ue. Outputs go to results/test4/. Appends one
+    summary.csv row per system (test=4, level=BASELINE_LEVEL) carrying only
+    linkvol_acc; the other metrics live on the Test 1 rows. Returns
+    (ok, elapsed). Raises RuntimeError if no system is usable.
+    """
+    import tempfile
+    base = os.path.join(results_root, "test1")
+    out_dir = os.path.join(results_root, "test4")
+    os.makedirs(out_dir, exist_ok=True)
+
+    view = tempfile.mkdtemp(prefix="test4_view_")
     try:
-        rc = subprocess.run(cmd, timeout=4*3600).returncode
-    except subprocess.TimeoutExpired:
-        log("ERROR: volume_estimation.py (Test 6) timed out after 4h")
+        # Proposed system -> view/test1/full_results (predict/actual pair).
+        src_full = os.path.join(base, "proposed", "full_results")
+        dst_full = os.path.join(view, "test1", "full_results")
+        os.makedirs(dst_full, exist_ok=True)
+        for pat in ("*" + T4_PREDICT_SUFFIX, "*" + T4_ACTUAL_SUFFIX):
+            for src in glob.glob(os.path.join(src_full, pat)):
+                shutil.copy2(src, dst_full)
+        # Scenario systems -> view/testN (predicted + actual).
+        for n, m in ((2, "rt1"), (3, "rt10"), (4, "ue")):
+            src_dir = os.path.join(base, m)
+            dst_dir = os.path.join(view, "test%d" % n)
+            os.makedirs(os.path.join(dst_dir, "full_results"),
+                        exist_ok=True)
+            pred = os.path.join(src_dir, "predicted_LinkMOE.csv")
+            if os.path.isfile(pred):
+                shutil.copy2(pred, dst_dir)
+            act = os.path.join(src_dir, "full_results",
+                               "output_LinkMOE.csv")
+            if os.path.isfile(act):
+                shutil.copy2(act, os.path.join(dst_dir, "full_results"))
+        systems = ["test%d" % n for n in (1, 2, 3, 4)]
+        cmd = [PY, os.path.join(HERE, "volume_estimation.py"),
+               "--results-dir", view,
+               "--output-dir", out_dir,
+               "--systems", ",".join(systems)]
         if tracker:
-            tracker.finish(6, False)
+            tracker.start("t4")
+            tracker.update("t4", None, "running volume estimation...")
+        log("Test 4: estimating future-condition volumes (%s) ..."
+            % ",".join(systems))
+        t0 = time.time()
+        try:
+            rc = subprocess.run(cmd, timeout=4 * 3600).returncode
+        except subprocess.TimeoutExpired:
+            log("ERROR: volume_estimation.py (Test 4) timed out after 4h")
+            if tracker:
+                tracker.finish("t4", False)
+            return False, time.time() - t0
+        dt = time.time() - t0
+        ok = rc == 0
+        if tracker:
+            tracker.finish("t4", ok)
+        log("Test 4: %s (%s)" % ("done" if ok else "FAILED", fmt_min(dt)))
+        if not ok:
+            return False, dt
+        # One summary.csv row per system, carrying only linkvol_acc.
+        # Accuracy is recomputed here from volume_estimation.csv with
+        # the same "<10%" rule as linkvol_accuracy(); rows with an
+        # empty discrepancy (zero actual volume) are excluded.
+        acc = _test4_accuracies(os.path.join(out_dir,
+                                             "volume_estimation.csv"))
+        sys_method = {1: "proposed", 2: "realtime_1min",
+                      3: "realtime_10min", 4: "ue"}
+        for n in (1, 2, 3, 4):
+            metrics = {"satisfaction": None, "veh_hrs": None,
+                       "delay": None, "energy": None, "co2": None,
+                       "nox": None, "co": None, "hc": None,
+                       "linkvol_acc": acc.get(n),
+                       "max_vc": None, "p95_vc": None, "over_cap": None,
+                       "heavy": None}
+            append_summary_row(results_root, seed, 4, BASELINE_LEVEL,
+                               sys_method[n], None, metrics)
+        return True, dt
+    finally:
+        shutil.rmtree(view, ignore_errors=True)
+
+
+def _test4_accuracies(csv_path):
+    """{test number: link-volume accuracy %} from volume_estimation.csv.
+    Systems are named test1..test4 in that file."""
+    acc = {}
+    if not os.path.isfile(csv_path):
+        return acc
+    counts = {}
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                n = int((row.get("system") or "").strip()[-1])
+            except (ValueError, IndexError):
+                continue
+            disc = (row.get("discrepancy_pct") or "").strip()
+            bin_ = (row.get("bin") or "").strip()
+            denom, within = counts.get(n, (0, 0))
+            if disc != "":
+                denom += 1
+                if bin_ == "<10%":
+                    within += 1
+            counts[n] = (denom, within)
+    for n, (denom, within) in counts.items():
+        acc[n] = (100.0 * within / denom) if denom else None
+    return acc
+
+
+# ----------------------------------------------------------------------
+# Test 2 aggregation (mpr_aggregate.py over the collected sweeps)
+# ----------------------------------------------------------------------
+def run_aggregation(results_root, seed, tracker=None):
+    """Run mpr_aggregate.py in-place on the collected Test 2 sweeps
+    (no sandbox). Writes mpr_table5.csv, mpr_table6.csv and
+    mpr_summary.txt into results/test2/. Returns (ok, elapsed). Raises
+    RuntimeError if there is nothing to aggregate."""
+    sweep_dir = os.path.join(results_root, "test2", "proposed_sweep")
+    ue_dir = os.path.join(results_root, "test2", "ue_sweep")
+    out_dir = os.path.join(results_root, "test2")
+    os.makedirs(out_dir, exist_ok=True)
+    if not glob.glob(os.path.join(sweep_dir, "bigloop_*")):
+        raise RuntimeError(
+            "Test 2: nothing to aggregate (no bigloop dirs in %s)"
+            % sweep_dir)
+    cmd = [PY, os.path.join(HERE, "mpr_aggregate.py"),
+           "--input-dir", sweep_dir,
+           "--ue-dir", ue_dir,
+           "--seed", str(seed),
+           "--output-dir", out_dir]
+    if tracker:
+        tracker.start("t2-agg")
+        tracker.update("t2-agg", None, "aggregating...")
+    log("Test 2: aggregating MPR sweep (mpr_aggregate.py) ...")
+    t0 = time.time()
+    try:
+        rc = subprocess.run(cmd, timeout=4 * 3600).returncode
+    except subprocess.TimeoutExpired:
+        log("ERROR: mpr_aggregate.py timed out after 4h; marking aggregation failed")
+        if tracker:
+            tracker.finish("t2-agg", False)
         return False, time.time() - t0
     dt = time.time() - t0
     ok = rc == 0
     if tracker:
-        tracker.finish(6, ok)
-    log("Test 6: %s (%s)" % ("done" if ok else "FAILED", fmt_min(dt)))
+        tracker.finish("t2-agg", ok)
+    log("Test 2: aggregation %s (%s)" % ("done" if ok else "FAILED",
+                                        fmt_min(dt)))
     return ok, dt
 
-
 # ----------------------------------------------------------------------
-# Run manifest (big-run package, Worker 4)
+# Run manifest (big-run package)
 # ----------------------------------------------------------------------
 # results/manifest.txt: methods setup facts for the paper, read at
 # runtime from the actual input files -- never hardcoded Sioux Falls
@@ -1294,11 +1764,7 @@ def run_test6(results_root, tracker=None):
 # Written once at run start (status: started) and rewritten at run end
 # (status: completed/failed) with outcomes. A missing or unreadable
 # input file is recorded as "unknown", never fatal: the manifest must
-# not kill a run. Engine-independent: it only records args.engine, it
-# never branches on it, so it works under --engine dtalite and pysim.
-# NOTE: the file lives at the results ROOT (results/manifest.txt), not
-# inside a per-test dir, so the auto-clear of per-test dirs (which runs
-# before the start-manifest write) can never delete it.
+# not kill a run.
 MANIFEST_NAME = "manifest.txt"
 _MANIFEST_UNKNOWN = "unknown"
 
@@ -1324,15 +1790,11 @@ def _manifest_csv_rows(path):
         return None
 
 
-def _manifest_agent_stats(data_dir):
-    """(agents, dep_min, dep_max, od_cells) from input_agent_initial.csv.
-
-    Any element is None when the file is missing or unreadable. OD
-    cells are distinct (from_zone_id, to_zone_id) pairs in the agent
-    file, i.e. the ODs actually travelled, as opposed to the demand
-    matrix below (which may list zero-demand cells as well).
-    """
-    path = os.path.join(data_dir, "input_agent_initial.csv")
+def _manifest_agent_stats(pool_file, data_dir):
+    """(agents, dep_min, dep_max, od_cells) from the pool file (or
+    input_agent_initial.csv when no pool file is given). Any element is
+    None when the file is missing or unreadable."""
+    path = pool_file or os.path.join(data_dir, "input_agent_initial.csv")
     try:
         with open(path, newline="") as f:
             reader = csv.reader(f)
@@ -1390,13 +1852,7 @@ def _manifest_demand_od_cells(data_dir):
 
 
 def _manifest_choice_set(data_dir):
-    """(source_file, od_cells, total_routes) for the choice set.
-
-    Baltimore path: choice_sets.pkl ({(oz, dz): [paths]}), counted
-    directly. Sioux Falls path: a MATLAB .mat file, counted via
-    scipy when available (finallist cells); without scipy the file is
-    still named but the counts stay unknown rather than guessed.
-    """
+    """(source_file, od_cells, total_routes) for the choice set."""
     pkl = os.path.join(data_dir, "choice_sets.pkl")
     if os.path.isfile(pkl):
         try:
@@ -1416,9 +1872,6 @@ def _manifest_choice_set(data_dir):
             final = mat.get("finallist")
             if final is None:
                 return (src, None, None)
-            # The pipeline transposes finallist (msa.py: choiceset =
-            # mat['finallist'].T), so OD cells are shape[1] after that
-            # transpose (576 ODs x up to 10 routes), not shape[0].
             ods = final.shape[1] if len(final.shape) == 2 else final.shape[0]
             routes = 0
             for cell in final.flat:
@@ -1433,30 +1886,24 @@ def _manifest_choice_set(data_dir):
     return (None, None, None)
 
 
-def _manifest_test6_systems(results_root):
-    """Tests 1-4 with a results dir on disk (Test 6's actual systems)."""
-    return ["test%d" % t for t in (1, 2, 3, 4)
-            if os.path.isdir(os.path.join(results_root,
-                                          RESULT_DIR_NAMES[t]))]
-
-
 def _manifest_val(value):
     return _MANIFEST_UNKNOWN if value is None else str(value)
 
 
 def write_run_manifest(results_root, args, tests, data_dir, status,
-                       outcomes=None, sweep_outcomes=None,
-                       agg_status=None, started=None, ended=None,
-                       cmdline=None):
+                       outcomes=None, agg_status=None, started=None,
+                       ended=None, cmdline=None, pool_file=None,
+                       levels=None, sample_counts=None):
     """Write (or rewrite) results/manifest.txt. Never raises."""
     try:
-        agents, dep_min, dep_max, agent_ods = _manifest_agent_stats(data_dir)
+        agents, dep_min, dep_max, agent_ods = _manifest_agent_stats(
+            pool_file, data_dir)
         demand_ods = _manifest_demand_od_cells(data_dir)
         links = _manifest_csv_rows(os.path.join(data_dir, "input_link.csv"))
         nodes = _manifest_csv_rows(os.path.join(data_dir, "input_node.csv"))
         choice_src, choice_ods, choice_routes = _manifest_choice_set(data_dir)
         lines = []
-        lines.append("Run manifest -- Bingrong Ch.4 Tests 1-6 (wholerunner.py)")
+        lines.append("Run manifest -- Tests 1-4 (wholerunner.py v2)")
         lines.append("status: %s" % status)
         lines.append("timestamp_start: %s" % _manifest_ts(started))
         lines.append("timestamp_end: %s" % _manifest_ts(ended))
@@ -1466,10 +1913,11 @@ def write_run_manifest(results_root, args, tests, data_dir, status,
         lines.append("results_dir: %s" % results_root)
         lines.append("engine: %s" % args.engine)
         lines.append("seed: %s" % args.seed)
+        lines.append("pool_file: %s" % (pool_file or _MANIFEST_UNKNOWN))
         lines.append("")
         lines.append("Demand and network (read from the input files):")
-        lines.append("agents: %s" % _manifest_val(agents))
-        lines.append("od_cells_agent_file: %s" % _manifest_val(agent_ods))
+        lines.append("pool_agents: %s" % _manifest_val(agents))
+        lines.append("od_cells_pool_file: %s" % _manifest_val(agent_ods))
         lines.append("od_cells_demand_file: %s" % _manifest_val(demand_ods))
         lines.append("choice_set_file: %s" % _manifest_val(choice_src))
         lines.append("choice_set_od_cells: %s" % _manifest_val(choice_ods))
@@ -1483,6 +1931,10 @@ def write_run_manifest(results_root, args, tests, data_dir, status,
         else:
             lines.append("departure_window_min: %s" % _MANIFEST_UNKNOWN)
             lines.append("departure_window_max: %s" % _MANIFEST_UNKNOWN)
+        if sample_counts:
+            lines.append("sampled_levels: %s"
+                         % ", ".join("%d agents (level %d)" % (c, lv)
+                                     for lv, c in sorted(sample_counts.items())))
         lines.append("")
         lines.append("Methods setup:")
         lines.append("standardization: meanstd28 "
@@ -1493,49 +1945,44 @@ def write_run_manifest(results_root, args, tests, data_dir, status,
         lines.append("preference_weights_reaction: true weights, "
                      "cols J:O of the weights sheet")
         lines.append("ue_gap_threshold: %s" % args.gap_threshold)
-        lines.append("ue_max_iters: %s" % T4_MAX_ITERS)
+        lines.append("ue_max_iters: %s" % UE_MAX_ITERS)
+        lines.append("baseline_level: %s agents" % BASELINE_LEVEL)
         lines.append("")
         lines.append("Per-test configuration (selected tests only):")
         lines.append("tests_selected: %s"
                      % ", ".join(str(t) for t in tests))
         if 1 in tests:
-            lines.append("test1_bigloops: %s"
-                         % ("10 only (single mode)"
-                            if args.test1_mode == "single"
-                            else "0-10 (sweep mode)"))
+            lines.append("test1: baseline %d agents, four systems "
+                         "(proposed bigloop 10, real-time 1-min, "
+                         "real-time 10-min, UE)" % BASELINE_LEVEL)
         if 2 in tests:
-            lines.append("test2_sigma_min: %s" % TESTS[2]["sigma"])
+            lines.append("test2: MPR sweep at %d agents, proposed "
+                         "bigloops 0-10, UE-guidance bigloops 1-10"
+                         % BASELINE_LEVEL)
         if 3 in tests:
-            lines.append("test3_sigma_min: %s" % TESTS[3]["sigma"])
+            lines.append("test3_levels: %s"
+                         % ", ".join(str(lv) for lv in (levels or [])))
+            lines.append("test3_mpr_points: %s"
+                         % ", ".join(str(p) for p in args.mpr_points))
+            lines.append("test3: at each level, four systems + MPR sweep "
+                         "at the listed points (proposed AND UE); "
+                         "the 50k level is re-run, not reused")
         if 4 in tests:
-            lines.append("test4_max_iters: %s" % T4_MAX_ITERS)
-            lines.append("test4_gap_threshold: %s" % args.gap_threshold)
-        if 5 in tests:
-            lines.append("test5_proposed_bigloops: %s"
-                         % TESTS[5]["subs"]["P"]["bigloops"])
-            lines.append("test5_ue_bigloops: %s"
-                         % TESTS[5]["subs"]["U"]["bigloops"])
-        if 6 in tests:
-            if status == "started":
-                lines.append("test6_systems: test1,test2,test3,test4 "
-                             "(planned; actual systems are those with "
-                             "results dirs when Test 6 runs)")
-            else:
-                lines.append("test6_systems: %s"
-                             % (",".join(_manifest_test6_systems(results_root))
-                                or _MANIFEST_UNKNOWN))
+            lines.append("test4: link-volume validation at the %d-agent "
+                         "baseline (volume_estimation.py over Test 1's "
+                         "four systems)" % BASELINE_LEVEL)
         if outcomes is not None:
             lines.append("")
             lines.append("Outcomes:")
             for t in tests:
-                if t == 5:
-                    lines.append("test5_proposed_sweep: %s"
-                                 % ("OK" if sweep_outcomes.get("P")
+                if t == 2:
+                    lines.append("test2_proposed_sweep: %s"
+                                 % ("OK" if outcomes.get("t2-P")
                                     else "FAILED"))
-                    lines.append("test5_ue_sweep: %s"
-                                 % ("OK" if sweep_outcomes.get("U")
+                    lines.append("test2_ue_sweep: %s"
+                                 % ("OK" if outcomes.get("t2-U")
                                     else "FAILED"))
-                    lines.append("test5_aggregation: %s"
+                    lines.append("test2_aggregation: %s"
                                  % (agg_status or _MANIFEST_UNKNOWN))
                 else:
                     lines.append("test%d: %s"
@@ -1549,140 +1996,90 @@ def write_run_manifest(results_root, args, tests, data_dir, status,
 
 
 # ----------------------------------------------------------------------
-# Table 4 emissions (Tests 1-4)
-# ----------------------------------------------------------------------
-def run_table4_emissions(results_root):
-    """Compute Table 4 emissions from the collected Tests 1-4 results.
-
-    Thin wrapper over table4_emissions.py (same directory): writes
-    table4_emissions.csv + table4_emissions_summary.txt into
-    results_root and appends a Table 4 block to each available per-test
-    summary file. Returns True if at least one scenario row was
-    written, False otherwise. Never raises for missing data -- a
-    partial run writes the rows it can and notes the rest -- but an
-    import failure or an output-write error propagates to the caller,
-    which logs it as a warning so the overall run is never failed by
-    this step alone. Deliberately independent of run_test6() and of
-    any manifest/threshold/auto-clear logic.
-    """
-    try:
-        import table4_emissions
-    except ImportError:
-        if HERE not in sys.path:
-            sys.path.insert(0, HERE)
-        import table4_emissions
-    rows, notes = table4_emissions.build_table4_emissions(results_root)
-    for note in notes:
-        log("Table 4: %s" % note)
-    if rows:
-        log("Table 4: wrote table4_emissions.csv (%d scenario rows)"
-            % len(rows))
-        return True
-    log("Table 4: WARNING: no scenario rows written "
-        "(no collected agent files found for Tests 1-4)")
-    return False
-
-
-# ----------------------------------------------------------------------
 # Final summary
 # ----------------------------------------------------------------------
-def print_summary(results_root, tests, outcomes, sweep_outcomes, agg_status):
+def print_summary(results_root, tests, outcomes, agg_status):
+    """outcomes maps test number -> bool (test 2 covers both sweeps
+    plus aggregation through agg_status)."""
     log("")
     log("=" * 60)
     log("SUMMARY")
     log("=" * 60)
     for t in tests:
-        if t == 5:
-            p5 = "OK" if sweep_outcomes.get("P") else "FAILED"
-            u5 = "OK" if sweep_outcomes.get("U") else "FAILED"
-            log("Test 5 (MPR sweep): proposed=%s ue=%s aggregation=%s"
-                % (p5, u5, agg_status))
+        if t == 2:
+            log("Test 2 (MPR sweep): proposed=%s ue=%s aggregation=%s"
+                % ("OK" if outcomes.get("t2-P") else "FAILED",
+                   "OK" if outcomes.get("t2-U") else "FAILED",
+                   agg_status))
             for fn in ("mpr_table5.csv", "mpr_table6.csv", "mpr_summary.txt"):
-                p = os.path.join(results_root, "test5", fn)
+                p = os.path.join(results_root, "test2", fn)
                 log("  %s: %s" % (fn, "present" if os.path.isfile(p)
                                   else "MISSING"))
             continue
-        if t == 6:
-            ok = outcomes.get(6)
-            log("Test 6 (volume est.): %s" % ("OK" if ok else "FAILED"))
-            p = os.path.join(results_root, "test6",
+        if t == 4:
+            log("Test 4 (link-volume validation): %s"
+                % ("OK" if outcomes.get(4) else "FAILED"))
+            p = os.path.join(results_root, "test4",
                              "volume_estimation_summary.txt")
             log("  volume_estimation_summary.txt: %s"
                 % ("present" if os.path.isfile(p) else "MISSING"))
             continue
-        name = RESULT_DIR_NAMES[t]
-        ok = outcomes.get(t)
-        log("Test %d (%s): %s" % (t, name, "OK" if ok else "FAILED"))
-        if t == 1 and ok:
-            p = os.path.join(results_root, name, "proposed_summary.txt")
-            if os.path.isfile(p):
-                with open(p) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("satisfaction:") or \
-                           line.startswith("vehicle-hours") or \
-                           line.startswith("per-agent"):
-                            log("  " + line)
-        elif ok:
-            p = os.path.join(results_root, name, "reaction_summary.txt")
-            if os.path.isfile(p):
-                with open(p) as f:
-                    for line in f:
-                        line = line.strip()
-                        if line.startswith("satisfaction:") or \
-                           line.startswith("vehicle-hours") or \
-                           line.startswith("per-agent"):
-                            log("  " + line)
-            else:
-                log("  (no reaction_summary.txt)")
-    t4 = os.path.join(results_root, "table4_emissions.csv")
-    log("Table 4 emissions: %s"
-        % ("present" if os.path.isfile(t4) else "MISSING"))
+        log("Test %d: %s" % (t, "OK" if outcomes.get(t) else "FAILED"))
+    summ = os.path.join(results_root, "summary.csv")
+    if os.path.isfile(summ):
+        try:
+            n_rows = count_csv_rows(summ)
+        except Exception:
+            n_rows = "?"
+        log("summary.csv: present (%s rows)" % n_rows)
+    else:
+        log("summary.csv: MISSING")
     log("=" * 60)
 
 
 # ----------------------------------------------------------------------
-# Main
+# Auto-clear (per-test / per-level scope only, never the results root)
 # ----------------------------------------------------------------------
-def auto_clear_results(results_root, tests):
+def auto_clear_results(results_root, tests, levels):
     """Delete and recreate the results subdirectories for the tests in
-    `tests` -- per-test scope only, never the results root itself.
+    `tests` -- per-test scope only, never the results root itself. For
+    Test 3 only the selected levels' directories are cleared, so a
+    re-run with --levels 20000 leaves other levels' results alone.
+    Also removes the per-seed summary.csv: it belongs to this run,
+    so a re-run starts with an empty summary instead of appending
+    duplicate rows onto the previous run's.
 
     Why: the collect_* functions only overwrite files, never delete
     them, so a stale file from a partial/failed run would otherwise
-    survive into the new run's tables (the stale Test 5 bigloop_1
-    class of bug). Clearing before a test runs makes every run start
-    from an empty per-test dir.
+    survive into the new run's tables. Clearing before a test runs
+    makes every run start from an empty per-test dir.
 
-    Scope rules (enforced by main()'s call site, after the Test 6
-    prereq fold):
-      * Only tests in `tests` are cleared. On a bare `--tests 6` run
-        that means test6/ only: Tests 1-4 results are Test 6's inputs
-        and must be left alone.
-      * A `--tests 6` run that folds in a missing prerequisite clears
-        that prerequisite's dir too, since it is about to be rerun;
-        usable prerequisites that were NOT folded in are untouched.
-      * A Test 4 run launched only as a Test 5 dependency (4 not in
-        `tests`) is NOT cleared: its existing ue_routes.csv is the
-        input the 5U sweep reuses.
     A removal failure is fatal (sys.exit(1)): proceeding with a
-    half-cleared dir would silently mix stale and fresh results, which
-    is exactly what auto-clear exists to prevent. The usual cause on
-    Windows is a locked file (stale python.exe / open file); unlock
-    and rerun. Engine-agnostic: this only touches result dirs, never
-    engine outputs in sandboxes.
+    half-cleared dir would silently mix stale and fresh results. The
+    usual cause on Windows is a locked file (stale python.exe / open
+    file); unlock and rerun.
     """
-    for t in sorted(set(tests)):
-        name = RESULT_DIR_NAMES.get(t)
-        if name is None:
-            continue
-        out = os.path.join(results_root, name)
-        # Safety: delete only a direct child of the results root, and
-        # never the root itself, whatever RESULT_DIR_NAMES holds.
-        if (os.path.abspath(out) == os.path.abspath(results_root)
-                or os.path.dirname(os.path.abspath(out))
-                != os.path.abspath(results_root)):
-            continue
+    _summ = os.path.join(results_root, "summary.csv")
+    if os.path.isfile(_summ):
+        try:
+            os.remove(_summ)
+        except OSError as e:
+            print("ERROR: Auto-clear failed to remove %s: %s"
+                  % (_summ, e), file=sys.stderr)
+            sys.exit(1)
+        log("Auto-clear: removed %s" % _summ)
+    else:
+        log("Auto-clear: %s did not exist, nothing to remove" % _summ)
+
+    def _clear_dir(out):
+        # Safety: delete only a direct child of the results root (or a
+        # level_<N> dir directly under test3/), never the root itself.
+        root_abs = os.path.abspath(results_root)
+        out_abs = os.path.abspath(out)
+        parent = os.path.dirname(out_abs)
+        if out_abs == root_abs or parent not in (
+                root_abs, os.path.join(root_abs, "test3")):
+            return
         if os.path.isdir(out):
             try:
                 shutil.rmtree(out)
@@ -1703,7 +2100,20 @@ def auto_clear_results(results_root, tests):
             log("Auto-clear: %s did not exist, nothing to remove" % out)
         os.makedirs(out, exist_ok=True)
 
+    for t in sorted(set(tests)):
+        if t == 3:
+            # Only the selected levels' dirs are cleared; other
+            # level_<N>/ dirs from earlier runs are left alone.
+            for lv in levels:
+                _clear_dir(os.path.join(results_root, "test3",
+                                        "level_%d" % lv))
+        else:
+            _clear_dir(os.path.join(results_root, "test%d" % t))
 
+
+# ----------------------------------------------------------------------
+# Multiseed driver
+# ----------------------------------------------------------------------
 def _seed_argv(base_argv, seed, results_dir):
     """Build the argv for one seed's subprocess run.
 
@@ -1752,12 +2162,10 @@ def run_multiseed(args, argv):
     Each seed runs as its own subprocess (python wholerunner.py with
     --seed <seed> and a per-seed --results-dir), so seeds are fully
     independent: a failure in one seed does not stop the others, and
-    each seed gets its own temp dir and run manifest. After a seed
-    finishes, linkmoe_delay.py is run on that seed's results (when
-    present) so delay is available for the aggregation, and
-    multiseed_aggregate.py then combines the headline metrics into
-    mean and standard deviation. Returns a process exit code (0 when
-    every seed and the aggregation succeeded).
+    each seed gets its own temp dir, run manifest and summary.csv.
+    aggregate_v2.py then combines the per-seed summary.csv
+    files into mean and standard deviation. Returns a process exit
+    code (0 when every seed and the aggregation succeeded).
     """
     seeds = list(args.seeds)
     raw = list(argv) if argv is not None else sys.argv[1:]
@@ -1794,35 +2202,15 @@ def run_multiseed(args, argv):
         ok[s] = (rc == 0)
         log("Multi-seed: seed %d %s (%s, rc=%d)"
             % (s, "done" if rc == 0 else "FAILED", fmt_min(dt), rc))
-        if rc != 0:
-            continue
-        delay_script = os.path.join(HERE, "linkmoe_delay.py")
-        delay_out = os.path.join(seed_dirs[s], "linkmoe_summary.txt")
-        if not os.path.isfile(delay_script):
-            log("Multi-seed: seed %d: linkmoe_delay.py not found, "
-                "delay will be unavailable for this seed" % s)
-            continue
-        try:
-            drc = subprocess.run(
-                [PY, delay_script, seed_dirs[s],
-                 "--out", delay_out]).returncode
-        except Exception as e:
-            log("Multi-seed: seed %d: delay step failed to start: %s" % (s, e))
-            continue
-        if drc == 0:
-            log("Multi-seed: seed %d: delay written to %s" % (s, delay_out))
-        else:
-            log("Multi-seed: seed %d: delay step FAILED (rc=%d); "
-                "delay will be unavailable for this seed" % (s, drc))
     good_dirs = [seed_dirs[s] for s in seeds if ok.get(s)]
     good_seeds = [s for s in seeds if ok.get(s)]
     if not good_dirs:
         print("ERROR: Multi-seed: no seed completed successfully; "
               "nothing to aggregate", file=sys.stderr)
         return 1
-    agg_script = os.path.join(HERE, "multiseed_aggregate.py")
+    agg_script = os.path.join(HERE, "aggregate_v2.py")
     if not os.path.isfile(agg_script):
-        print("ERROR: Multi-seed: multiseed_aggregate.py not found next to "
+        print("ERROR: Multi-seed: aggregate_v2.py not found next to "
               "wholerunner.py", file=sys.stderr)
         return 1
     agg_cmd = [PY, agg_script,
@@ -1848,23 +2236,191 @@ def run_multiseed(args, argv):
     log("Multi-seed: all done (%s total)" % fmt_min(time.time() - t_start))
     return 0
 
+# ----------------------------------------------------------------------
+# Job construction
+# ----------------------------------------------------------------------
+def _job(key, label, kind, test, level, method, scripts, out_dir,
+         collect, commands, bigloops=None, sub=None, depends_on=None):
+    """One job dict. `commands` is a callable (sandbox, args) -> cmds.
+    `bigloops` (sweeps only) is a list of (bigloop, mpr) pairs.
+    `depends_on` is the key of the UE job whose ue_routes.csv this job
+    needs (UE-guidance sweeps only)."""
+    JOB_KINDS[key] = kind
+    DISPLAY_LABELS[key] = label
+    return {"key": key, "label": label, "kind": kind, "test": test,
+            "level": level, "method": method,
+            "scripts": scripts_for(scripts), "out_dir": out_dir,
+            "collect": collect, "commands": commands,
+            "bigloops": bigloops or [], "sub": sub,
+            "depends_on": depends_on,
+            "sandbox_name": key.replace("-", "_")}
 
+
+def build_jobs(args, tests, levels, mpr_points, results_root):
+    """Build the job dict for the selected tests. Returns (jobs, extra):
+    jobs maps key -> job dict; extra is the set of keys that are
+    dependency-only jobs (not part of the selected tests) -- currently
+    just the Test 1 UE job when Test 2 needs it but Test 1 was not
+    selected and no usable ue_routes.csv exists yet."""
+    jobs = {}
+    extra = set()
+    t1 = os.path.join(results_root, "test1")
+
+    def add_system_jobs(test, level, base_dir):
+        """The four system jobs for one (test, level)."""
+        prefix = "t%d" % test if test == 1 else "t3-L%d" % level
+        # Proposed (v9, bigloop 10).
+        jobs[prefix + "-proposed"] = _job(
+            prefix + "-proposed",
+            "T%d L%d Proposed" % (test, level), "v9", test, level,
+            "proposed", V9_SCRIPTS,
+            os.path.join(base_dir, "proposed"), "proposed",
+            lambda sb, a: proposed_commands(sb, a.seed, a.network,
+                                           a.engine))
+        # Real-time 1-min and 10-min.
+        for method, mlabel in (("realtime_1min", "RT-1min"),
+                               ("realtime_10min", "RT-10min")):
+            jobs[prefix + "-" + METHOD_DIRS[method]] = _job(
+                prefix + "-" + METHOD_DIRS[method],
+                "T%d L%d %s" % (test, level, mlabel), "rt", test, level,
+                method,
+                ["scenarios_realtime.py", "preference_reaction.py",
+                 "netconfig.py"],
+                os.path.join(base_dir, METHOD_DIRS[method]), "scenario",
+                lambda sb, a, m=method: scenario_commands(
+                    m, sb, a.seed, a.network, a.gap_threshold, a.engine))
+        # UE guidance.
+        jobs[prefix + "-ue"] = _job(
+            prefix + "-ue", "T%d L%d UE" % (test, level), "ue", test,
+            level, "ue",
+            ["scenarios_ue.py", "preference_reaction.py", "netconfig.py"],
+            os.path.join(base_dir, "ue"), "scenario",
+            lambda sb, a: scenario_commands(
+                "ue", sb, a.seed, a.network, a.gap_threshold, a.engine))
+
+    if 1 in tests:
+        add_system_jobs(1, BASELINE_LEVEL, t1)
+    if 3 in tests:
+        for lv in levels:
+            add_system_jobs(3, lv, os.path.join(
+                results_root, "test3", "level_%d" % lv))
+
+    # Test 2 sweeps (MPR sweep at the 50k baseline).
+    if 2 in tests:
+        t2 = os.path.join(results_root, "test2")
+        p_loops = [(n, 0 if n == 0 else n * 10) for n in range(0, 11)]
+        jobs["t2-P"] = _job(
+            "t2-P", "T2 Proposed sweep", "v9", 2, BASELINE_LEVEL,
+            "proposed", V9_SCRIPTS,
+            os.path.join(t2, "proposed_sweep"), "sweep",
+            lambda sb, a: sweep_commands(
+                "P", sb, a.seed,
+                bigloops=[n for n, _m in p_loops],
+                network=a.network, engine=a.engine),
+            bigloops=p_loops, sub="P")
+        u_loops = [(n, n * 10) for n in range(1, 11)]
+        ue_job_key = "t1-ue"
+        if 1 not in tests:
+            # Test 2's UE sweep needs Test 1's ue_routes.csv. Prefer an
+            # existing one; otherwise run the Test 1 UE job as a
+            # dependency-only job (its results land in test1/ue/).
+            existing = os.path.join(t1, "ue", "ue_routes.csv")
+            if os.path.isfile(existing):
+                log("Test 2: using existing results/test1/ue/ue_routes.csv")
+                ue_job_key = None
+                jobs["t2-U"] = _job(
+                    "t2-U", "T2 UE sweep", "v9", 2, BASELINE_LEVEL, "ue",
+                    UE_SWEEP_SCRIPTS, os.path.join(t2, "ue_sweep"),
+                    "sweep",
+                    lambda sb, a: sweep_commands(
+                        "U", sb, a.seed,
+                        bigloops=[n for n, _m in u_loops],
+                        ue_routes_path=os.path.join(sb, "ue_routes.csv"),
+                        network=a.network, engine=a.engine),
+                    bigloops=u_loops, sub="U")
+                jobs["t2-U"]["ue_routes_src"] = existing
+            else:
+                log("Test 2: no usable ue_routes.csv -- running the "
+                    "Test 1 UE job as a dependency")
+                add_system_jobs(1, BASELINE_LEVEL, t1)
+                # Only the UE job is a dependency; drop the other three
+                # Test 1 jobs (Test 1 was not selected).
+                for k in ("t1-proposed", "t1-rt1", "t1-rt10"):
+                    jobs.pop(k, None)
+                    JOB_KINDS.pop(k, None)
+                    DISPLAY_LABELS.pop(k, None)
+                extra.add("t1-ue")
+        if ue_job_key is not None:
+            jobs["t2-U"] = _job(
+                "t2-U", "T2 UE sweep", "v9", 2, BASELINE_LEVEL, "ue",
+                UE_SWEEP_SCRIPTS, os.path.join(t2, "ue_sweep"), "sweep",
+                lambda sb, a: sweep_commands(
+                    "U", sb, a.seed,
+                    bigloops=[n for n, _m in u_loops],
+                    ue_routes_path=os.path.join(sb, "ue_routes.csv"),
+                    network=a.network, engine=a.engine),
+                bigloops=u_loops, sub="U", depends_on="t1-ue")
+
+    # Test 3 sweeps at the --mpr-points points (proposed AND UE, per level).
+    if 3 in tests:
+        for lv in levels:
+            base = os.path.join(results_root, "test3", "level_%d" % lv)
+            pts = [(p, p) for p in mpr_points]
+            prefix = "t3-L%d" % lv
+            jobs[prefix + "-P"] = _job(
+                prefix + "-P", "T3 L%d Proposed sweep" % lv, "v9", 3, lv,
+                "proposed", V9_SCRIPTS,
+                os.path.join(base, "proposed_sweep"), "sweep",
+                lambda sb, a, pp=mpr_points: sweep_commands(
+                    "P", sb, a.seed, mpr_points=pp,
+                    network=a.network, engine=a.engine),
+                bigloops=pts, sub="P")
+            jobs[prefix + "-U"] = _job(
+                prefix + "-U", "T3 L%d UE sweep" % lv, "v9", 3, lv, "ue",
+                UE_SWEEP_SCRIPTS, os.path.join(base, "ue_sweep"), "sweep",
+                lambda sb, a, pp=mpr_points: sweep_commands(
+                    "U", sb, a.seed, mpr_points=pp,
+                    ue_routes_path=os.path.join(sb, "ue_routes.csv"),
+                    network=a.network, engine=a.engine),
+                bigloops=pts, sub="U", depends_on=prefix + "-ue")
+    return jobs, extra
+
+
+# ----------------------------------------------------------------------
+# Main
+# ----------------------------------------------------------------------
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(
-        description="Run Bingrong Ch.4 Tests 1-6 in parallel sandboxes.")
+        description="Run Tests 1-4 (v2 revamp) in parallel sandboxes: "
+                    "50k-agent baseline, MPR sweep, demand-level sweep, "
+                    "link-volume validation.")
     ap.add_argument("--tests", default=None,
                     help="tests to run: comma-separated ints and ranges, e.g. "
-                         "1 | 1,2,3 | 1-4 | 1,5,6 | 1-4,6 "
-                         "(default: 1,2,3,4)")
-    ap.add_argument("--skip-test1", action="store_true",
-                    help="DEPRECATED: same as --tests 2,3,4")
+                         "1 | 1,3 | 1-4 (default: 1,2,3,4)")
     ap.add_argument("--data-dir", default="DTALite_Files",
                     help="read-only DTALite_Files source (default: "
                          "DTALite_Files)")
+    ap.add_argument("--pool-file", default=None,
+                    help="agent pool CSV to sample from (default: "
+                         "<data-dir>/input_agent_pool.csv). Missing pool "
+                         "file is a fatal error; there is no fallback.")
+    ap.add_argument("--levels", default="20000,30000,40000,50000,60000,"
+                                        "70000,80000",
+                    help="Test 3 demand levels in agents, comma-separated "
+                         "(default: 20000,30000,40000,50000,60000,70000,"
+                         "80000)")
+    ap.add_argument("--baseline-level", type=int, default=BASELINE_LEVEL,
+                    help="baseline demand level in agents for Tests 1, 2 "
+                         "and 4 (default: 50000). Test 3 levels still come "
+                         "from --levels. Use a small value (e.g. 200) for "
+                         "smoke runs against a small pool.")
+    ap.add_argument("--mpr-points", default="33,66",
+                    help="Test 3 MPR sweep points in percent, "
+                         "comma-separated (default: 33,66)")
     ap.add_argument("--gap-threshold", type=float, default=0.001,
-                    help="UE relative gap convergence threshold (Test 4; "
-                         "the Test 5 UE sweep reuses Test 4's ue_routes.csv "
-                         "and so inherits this threshold; default: 0.001)")
+                    help="UE relative gap convergence threshold (UE jobs; "
+                         "the UE sweeps reuse the UE job's ue_routes.csv "
+                         "and so inherit this threshold; default: 0.001)")
     ap.add_argument("--network", default="siouxfalls",
                     choices=["siouxfalls", "baltimore"],
                     help="network: siouxfalls (default) or baltimore "
@@ -1879,39 +2435,41 @@ def parse_args(argv=None):
     ap.add_argument("--keep-temp", action="store_true",
                     help="keep temp/run_<pid>/ sandboxes after success")
     ap.add_argument("--max-workers", type=int, default=None,
-                    help="parallel workers (default: min(4, phase-A jobs))")
+                    help="parallel workers (default: min(4, jobs))")
     ap.add_argument("--stall-timeout-min", type=float, default=30,
-                    help="kill a test if no progress for this many minutes "
+                    help="kill a job if no progress for this many minutes "
                          "(default: 30; 0 disables)")
     ap.add_argument("--no-progress", action="store_true",
                     help="disable the live progress display")
-    ap.add_argument("--seed", type=int, default=42,
-                    help="random seed for all tests (Tests 2-4 and the v9 "
-                         "pipeline; default: 42)")
-    ap.add_argument("--seeds", type=int, nargs="+", default=None,
+    ap.add_argument("--seed", type=int, default=None,
+                    help="random seed for all jobs (single-seed run). "
+                         "Cannot be combined with --seeds. When neither "
+                         "--seed nor --seeds is given, all default seeds "
+                         "run (see --seeds).")
+    ap.add_argument("--seeds", type=int, nargs="+", default=DEFAULT_SEEDS,
                     help="run all tests for each of these seeds (e.g. "
                          "--seeds 42 43 44); each seed's results go to "
                          "<results-dir>_seed<seed> and the headline "
                          "metrics are aggregated into <results-dir>_multiseed. "
+                         "Default: 42 423 454 162 904 916 91 962 201 624. "
                          "Cannot be combined with --seed.")
-    ap.add_argument("--test1-mode", choices=["single", "sweep"],
-                    default="single",
-                    help="Test 1 bigloops: single = bigloop 10 only "
-                         "(100pct MPR, Test 1); sweep = all 11 bigloops "
-                         "(legacy MPR sweep spelling -- new runs should use "
-                         "--tests 5). Default: single.")
-    ap.add_argument("--test6-force-rerun", action="store_true",
-                    help="Test 6: ignore existing results/testN/ outputs and "
-                         "rerun prerequisite Tests 1-4 before estimating")
+    ap.add_argument("--test4-force-rerun", action="store_true",
+                    help="Test 4: ignore existing results/test1/ outputs and "
+                         "rerun Test 1 before validating")
     ap.add_argument("--skip-aggregation", action="store_true",
-                    help="Test 5: run both MPR sweeps but skip the "
+                    help="Test 2: run both MPR sweeps but skip the "
                          "mpr_aggregate.py step")
     return ap.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    global _RUN_STALL_S
+    global _RUN_STALL_S, BASELINE_LEVEL
+    if args.baseline_level < 1:
+        print("ERROR: --baseline-level must be a positive integer "
+              "(got %s)" % args.baseline_level, file=sys.stderr)
+        sys.exit(2)
+    BASELINE_LEVEL = args.baseline_level
     if args.stall_timeout_min <= 0:
         _RUN_STALL_S = float('inf')
     else:
@@ -1929,22 +2487,25 @@ def main(argv=None):
         if "--results-dir" not in _argv_str and args.results_dir == "results":
             args.results_dir = "results_baltimore"
 
-    if args.skip_test1:
-        warnings.warn("--skip-test1 is deprecated; use --tests 2,3,4",
-                      DeprecationWarning, stacklevel=2)
-        log("WARNING: --skip-test1 is deprecated; use --tests 2,3,4")
-        if args.tests is not None:
-            print("ERROR: --skip-test1 cannot be combined with --tests",
-                  file=sys.stderr)
-            sys.exit(2)
-        tests = [2, 3, 4]
-    else:
-        try:
-            tests = parse_tests_spec(
-                args.tests if args.tests is not None else "1,2,3,4")
-        except ValueError as e:
-            print("ERROR: %s" % e, file=sys.stderr)
-            sys.exit(2)
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    seed_given = any(t == "--seed" or t.startswith("--seed=")
+                     for t in raw)
+    seeds_given = any(t == "--seeds" or t.startswith("--seeds=")
+                      for t in raw)
+    if seed_given and seeds_given:
+        print("ERROR: --seed and --seeds cannot be combined",
+              file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        tests = parse_tests_spec(
+            args.tests if args.tests is not None else "1,2,3,4")
+        levels = parse_int_list(args.levels, "--levels", lo=1)
+        mpr_points = parse_int_list(args.mpr_points, "--mpr-points",
+                                    lo=0, hi=100)
+    except ValueError as e:
+        print("ERROR: %s" % e, file=sys.stderr)
+        sys.exit(2)
     tests = sorted(set(tests))
 
     data_dir = os.path.abspath(args.data_dir)
@@ -1954,116 +2515,126 @@ def main(argv=None):
         print("ERROR: data dir not found: %s" % data_dir, file=sys.stderr)
         sys.exit(2)
 
+    pool_file = (os.path.abspath(args.pool_file) if args.pool_file
+                 else os.path.join(data_dir, "input_agent_pool.csv"))
+
     # Multi-seed mode: run the whole pipeline once per seed (each seed
     # in its own subprocess) and aggregate. Returns here; the
-    # single-seed body below never runs in this mode.
-    if args.seeds is not None:
+    # single-seed body below never runs in this mode. Bare invocation
+    # (no --seed) runs the default seed list.
+    if not seed_given:
+        args.seeds = list(args.seeds)
         sys.exit(run_multiseed(args, argv))
+    args.seed = args.seed if args.seed is not None else 42
+
+    # The pool file is a hard dependency: fail loudly before anything
+    # runs. There is no fallback to the old input file.
+    if not os.path.isfile(pool_file):
+        print("ERROR: pool file not found: %s\n"
+              "Generate/place the agent pool file (same 15-column format "
+              "as input_agent_initial.csv) or pass --pool-file <path>."
+              % pool_file, file=sys.stderr)
+        sys.exit(2)
 
     os.makedirs(results_root, exist_ok=True)
     os.makedirs(temp_root, exist_ok=True)
 
-    # Test 6 smart mode: fold missing prerequisites into the selection
-    # BEFORE setup, so they run in Phase A like any other selected test.
-    if 6 in tests:
-        prereqs = [t for t in (1, 2, 3, 4)
-                   if t not in tests
-                   and not (results_exist(t, results_root)
-                            and not args.test6_force_rerun)]
-        if prereqs:
-            log("Test 6: no usable results for test(s) %s -- running them "
-                "as prerequisites" % prereqs)
-            tests = sorted(set(tests) | set(prereqs))
+    # Test 4 needs Test 1's four systems. If Test 1 was not selected,
+    # reuse existing results when usable; otherwise fold Test 1 in
+    # (it runs in Phase A like any other selected test).
+    if 4 in tests and 1 not in tests:
+        if args.test4_force_rerun or not test1_results_exist(results_root):
+            log("Test 4: no usable Test 1 results -- running Test 1 as a "
+                "prerequisite")
+            tests = sorted(set(tests) | {1})
+        else:
+            log("Test 4: using existing results/test1/ outputs")
+
+    # Levels that need a sample: the 50k baseline for Tests 1/2/4
+    # (including a Test 1 folded in for Test 4, and the Test 2 UE
+    # dependency job), plus every --levels level for Test 3.
+    needed_levels = set()
+    if any(t in tests for t in (1, 2, 4)):
+        needed_levels.add(BASELINE_LEVEL)
+    if 3 in tests:
+        needed_levels.update(levels)
+    # Test 2's UE dependency job (Test 1 not selected, no existing
+    # ue_routes.csv) also needs the 50k sample; build_jobs decides
+    # that, so sample 50k whenever Test 2 is selected at all.
+    if 2 in tests:
+        needed_levels.add(BASELINE_LEVEL)
+
+    # Sample once per (seed, level); every job at a level shares the
+    # same sampled file. A sampling failure is fatal, before any job
+    # is set up.
+    samples = {}
+    sample_counts = {}
+    try:
+        for lv in sorted(needed_levels):
+            out_csv = os.path.join(temp_root, "samples",
+                                   "sample_seed%d_level%d.csv"
+                                   % (args.seed, lv))
+            sample_level(pool_file, args.seed, lv, out_csv)
+            samples[lv] = out_csv
+            sample_counts[lv] = lv
+    except RuntimeError as e:
+        print("ERROR: sampling failed: %s" % e, file=sys.stderr)
+        sys.exit(1)
+
+    jobs, extra = build_jobs(args, tests, levels, mpr_points, results_root)
+
+    # A dependency-only Test 1 UE job writes into test1/ue/, which
+    # auto-clear (scoped to selected tests) would not clear. Clear
+    # just that method dir: it is about to be rerun.
+    if "t1-ue" in extra:
+        _dep_out = jobs["t1-ue"]["out_dir"]
+        if os.path.isdir(_dep_out):
+            shutil.rmtree(_dep_out)
+            log("Auto-clear: removed dependency dir %s" % _dep_out)
 
     # Auto-clear: delete + recreate ONLY the results dirs of the tests
-    # about to run, so stale files from a partial/failed run can never
-    # survive into this run's tables. Placed AFTER the Test 6 prereq
-    # fold on purpose: clearing before the fold would make
-    # results_exist() false for every test and turn a bare --tests 6
-    # analysis run into a full rerun. Tests 1-4 are therefore cleared
-    # only when they are in `tests` (selected, or folded in as a
-    # missing prerequisite); a bare --tests 6 run clears test6/ only.
-    # Test 4 as a Test 5-only dependency (4 not in `tests`) is not
-    # cleared: its existing ue_routes.csv is the 5U sweep's input.
-    auto_clear_results(results_root, tests)
+    # about to run (Test 3: only the selected levels), so stale files
+    # from a partial/failed run can never survive into this run's
+    # tables. Placed AFTER the Test 4 prereq fold on purpose: clearing
+    # before the fold would make test1_results_exist() false and turn
+    # a bare --tests 4 analysis run into a full rerun.
+    auto_clear_results(results_root, tests, levels)
 
     # Run manifest (start): rewritten at run end with outcomes.
-    # Placed AFTER auto-clear on purpose: the manifest lives at the
-    # results root, which auto-clear never touches, and the start
-    # write must not precede the Test 6 prereq fold above (so the
-    # selected-tests list it records is final).
     _run_started = time.time()
     _run_cmdline = (" ".join(sys.argv) if argv is None
                     else " ".join([sys.argv[0]] + list(argv)))
     write_run_manifest(results_root, args, tests, data_dir, "started",
-                       None, None, None, _run_started, None, _run_cmdline)
+                       None, None, _run_started, None, _run_cmdline,
+                       pool_file, levels, sample_counts)
 
-    # Test 5 UE sweep needs its 8 scripts next to this file (the
-    # UE-guidance trio plus the 5 v9 support scripts). Fail fast if
-    # any are missing. Resolve through scripts_for_sweep so this
-    # check can never drift from the sandbox spec.
-    if 5 in tests:
-        missing = []
-        for src_dir, fn in scripts_for_sweep("U"):
-            src = (os.path.join(HERE, src_dir, fn) if src_dir
-                   else os.path.join(HERE, fn))
-            if not os.path.isfile(src):
-                missing.append(src)
-        if missing:
-            print("ERROR: Test 5 UE sweep is missing required script(s): %s"
-                  % ", ".join(missing), file=sys.stderr)
-            sys.exit(1)
-
-    # If Test 5 is selected without Test 4, resolve ue_routes.csv BEFORE
-    # Phase A so the 5U sweep can start immediately in Phase A instead of
-    # waiting. (When Test 4 IS selected, 5U starts from inside the Phase A
-    # loop as soon as Test 4 is collected.)
-    ue_routes_pre = None
-    if 5 in tests and 4 not in tests:
-        _pre_target = os.path.join(results_root, "test4", "ue_routes.csv")
-        if os.path.isfile(_pre_target):
-            log("Test 5: using existing results/test4/ue_routes.csv")
-            ue_routes_pre = _pre_target
-        else:
-            log("Test 5: no usable ue_routes.csv -- running Test 4 as a "
-                "dependency before Phase A ...")
-            try:
-                _sb_dep4 = setup_sandbox("test_dep4", data_dir, temp_root,
-                                         scripts_for_test(4))
-            except Exception as e:
-                print("ERROR: sandbox setup failed for Test 4 dependency: %s"
-                      % e, file=sys.stderr)
-                ue_routes_pre = None
-            else:
-                _ok_dep4, _dt_dep4 = run_test(4, _sb_dep4, None, args.seed,
-                                              "single", args.network,
-                                              args.gap_threshold, args.engine)
-                if _ok_dep4:
-                    try:
-                        collect_234(4, _sb_dep4, results_root)
-                    except Exception as e:
-                        print("ERROR: dependency Test 4 collection failed: %s"
-                              % e, file=sys.stderr)
-                        _ok_dep4 = False
-                if not args.keep_temp:
-                    try:
-                        shutil.rmtree(_sb_dep4)
-                    except Exception:
-                        pass
-                if _ok_dep4 and os.path.isfile(_pre_target):
-                    log("Test 5: dependency Test 4 produced ue_routes.csv")
-                    ue_routes_pre = _pre_target
-                else:
-                    print("ERROR: Test 5 UE sweep needs ue_routes.csv: "
-                          "dependency Test 4 failed and no existing "
-                          "results/test4/ue_routes.csv", file=sys.stderr)
-                    ue_routes_pre = None
+    # Fail fast if a sweep job's scripts are missing next to this file.
+    for key, job in jobs.items():
+        if job["collect"] == "sweep":
+            missing = []
+            for src_dir, fn in job["scripts"]:
+                src = (os.path.join(HERE, src_dir, fn) if src_dir
+                       else os.path.join(HERE, fn))
+                if not os.path.isfile(src):
+                    missing.append(src)
+            if missing:
+                print("ERROR: %s is missing required script(s): %s"
+                      % (key, ", ".join(missing)), file=sys.stderr)
+                sys.exit(1)
 
     if args.max_workers is not None and args.max_workers < 1:
         print("ERROR: --max-workers must be >= 1", file=sys.stderr)
         sys.exit(2)
 
-    keys = progress_keys(tests)
+    # Tracker keys: one per job, plus the Test 2 aggregation and
+    # Test 4 pseudo-jobs when selected.
+    keys = list(jobs.keys())
+    if 2 in tests:
+        keys.append("t2-agg")
+        DISPLAY_LABELS["t2-agg"] = "T2 (aggregate)"
+    if 4 in tests:
+        keys.append("t4")
+        DISPLAY_LABELS["t4"] = "T4 (volume est.)"
 
     # Live progress display unless disabled or stdout is not a terminal.
     use_progress = (not args.no_progress) and sys.stdout.isatty()
@@ -2072,19 +2643,15 @@ def main(argv=None):
     display_thread = None
 
     log("Engine: %s" % args.engine)
-    log("Tests: %s (keys: %s)" % (tests, keys))
-    log("Seed: %d (all tests)" % args.seed)
-    if 1 in tests:
-        log("Test 1 mode: %s (%s)" % (
-            args.test1_mode,
-            "bigloop 10 only" if args.test1_mode == "single"
-            else "all 11 bigloops (MPR sweep; consider --tests 5)"))
+    log("Tests: %s (jobs: %s)" % (tests, sorted(jobs.keys())))
+    log("Seed: %d (all jobs)" % args.seed)
+    log("Pool: %s" % pool_file)
+    log("Levels: %s" % sorted(samples.keys()))
     log("Data dir: %s (read-only)" % data_dir)
     log("Results dir: %s" % results_root)
     log("Temp root: %s" % temp_root)
     if use_progress:
         log("Live progress display enabled (refresh every 2s)")
-        # Print a blank block so the first redraw has room to move up.
         display_thread = threading.Thread(
             target=display_loop, args=(tracker, keys, stop_event),
             daemon=True)
@@ -2093,25 +2660,24 @@ def main(argv=None):
         log("Progress display disabled (stdout is not a terminal)")
 
     # ---- Phase A setup (fail-fast) ----
+    # Set up sandboxes for every job that does not wait on a UE job.
+    # UE-guidance sweeps are set up later, when their ue_routes.csv
+    # is ready (see _maybe_start_sweep).
     sandboxes = {}
+    pending = {}  # job key -> job dict, waiting on its UE dependency
     try:
-        for t in tests:
-            if t in (1, 2, 3, 4):
-                sandboxes[t] = setup_sandbox(
-                    "test_%d" % t, data_dir, temp_root, scripts_for_test(t))
-        if 5 in tests:
-            sandboxes["5P"] = setup_sandbox(
-                "test_5P", data_dir, temp_root, scripts_for_sweep("P"))
-            # Set up 5U sandbox here too (not inside the executor) so a
-            # startup failure is caught by the fail-fast handler above.
-            # The 5U sweep itself is submitted in the executor below.
-            if 4 not in tests and ue_routes_pre and os.path.isfile(ue_routes_pre):
-                _sb5u_pre = setup_sandbox(
-                    "test_5U", data_dir, temp_root, scripts_for_sweep("U"))
-                shutil.copy2(ue_routes_pre,
-                             os.path.join(_sb5u_pre, "ue_routes.csv"))
-                sandboxes["5U"] = _sb5u_pre
-                log("Test 5: 5U sandbox ready (ue_routes.csv pre-resolved)")
+        for key, job in jobs.items():
+            if job.get("depends_on"):
+                pending[key] = job
+                continue
+            sb = setup_sandbox(job["sandbox_name"], data_dir, temp_root,
+                               job["scripts"],
+                               sample_csv=samples[job["level"]])
+            if job.get("ue_routes_src"):
+                shutil.copy2(job["ue_routes_src"],
+                             os.path.join(sb, "ue_routes.csv"))
+                log("%s: using pre-resolved ue_routes.csv" % key)
+            sandboxes[key] = sb
     except Exception as e:
         print("ERROR: sandbox setup failed: %s" % e, file=sys.stderr)
         if display_thread:
@@ -2119,156 +2685,40 @@ def main(argv=None):
             display_thread.join(timeout=5)
         sys.exit(1)
 
-    # ---- Phase A run (Tests 1-4 plus the proposed sweep, in parallel) ----
-    # The proposed sweep (5P) is independent of everything, so it starts
-    # in Phase A rather than being serialized behind Tests 1-4.
+    # ---- Phase A run (all independent jobs in parallel) ----
     t_start = time.time()
-    outcomes = {t: False for t in tests}
-    sweep_outcomes = {"P": False, "U": False}
+    outcomes = {key: False for key in jobs}
+    test4_done = False
+    test4_ok = False
     agg_status = "not-run"
     n_jobs = len(sandboxes)
     max_workers = args.max_workers or min(4, max(1, n_jobs))
 
-    if n_jobs:
-        # Track whether Test 6 has been triggered (it runs as soon as
-        # Tests 1-4 are all collected, without waiting for the 5P sweep).
-        test6_done = False
-        tests_14 = [t for t in tests if t in (1, 2, 3, 4)]
+    if n_jobs or pending:
+        _PHASE_A_TIMEOUT_S = 18 * 3600
+        _POLL_INTERVAL_S = 10.0
 
-        # The 5U sweep starts as soon as Test 4's ue_routes.csv is
-        # available (right after Test 4 is collected), instead of waiting
-        # for the whole of Phase A (including the 5P sweep).
-        # sweep_5u_started prevents double-start.
-        sweep_5u_started = False
-        test4_completed = False
-
-        # Single futures dict for ALL Phase A jobs. 5U goes here too
-        # (no separate fut_5u_box indirection) so the polling loop below
-        # handles every job uniformly. Values are ("test", t) or
-        # ("sweep", "5P"/"5U").
-        futures = {}
-
-        def _maybe_start_5u():
-            # Start the 5U sweep if its ue_routes.csv prerequisite is met.
-            # Called after each Phase A job completes. When Test 4 is
-            # selected, waits for this run's Test 4 to succeed+collect.
-            # When Test 4 is not selected, uses the pre-resolved path
-            # (ue_routes_pre) immediately. Submits directly into the
-            # shared futures dict (no fut_5u_box).
-            nonlocal sweep_5u_started, test4_completed
-            if sweep_5u_started or 5 not in tests:
-                return
-            ue_routes = None
-            if 4 in tests:
-                if not test4_completed:
-                    return  # Test 4 hasn't finished yet
-                if not outcomes.get(4):
-                    # Test 4 failed -- 5U cannot run; fail it loudly.
-                    log("Test 5: Test 4 failed -- UE sweep (5U) cannot run")
-                    sweep_outcomes["U"] = False
-                    sweep_5u_started = True
-                    if tracker:
-                        tracker.finish("5U", False)
-                    return
-                candidate = os.path.join(results_root, "test4",
-                                         "ue_routes.csv")
-                if os.path.isfile(candidate):
-                    ue_routes = candidate
-                    log("Test 5: using ue_routes.csv from this run's Test 4")
-                else:
-                    log("Test 5: Test 4 succeeded but %s is missing -- "
-                        "UE sweep (5U) cannot run" % candidate)
-                    sweep_outcomes["U"] = False
-                    sweep_5u_started = True
-                    if tracker:
-                        tracker.finish("5U", False)
-                    return
-            else:
-                # Test 4 not selected: use the pre-resolved path (may be
-                # None if the dependency run failed -- fail 5U loudly).
-                if ue_routes_pre and os.path.isfile(ue_routes_pre):
-                    ue_routes = ue_routes_pre
-                else:
-                    log("Test 5: no ue_routes.csv available -- "
-                        "UE sweep (5U) cannot run")
-                    sweep_outcomes["U"] = False
-                    sweep_5u_started = True
-                    if tracker:
-                        tracker.finish("5U", False)
-                    return
-            # Start the 5U sweep in the (still-open) executor, adding it
-            # to the shared futures dict.
-            sweep_5u_started = True
-            try:
-                sb5u = setup_sandbox("test_5U", data_dir, temp_root,
-                                     scripts_for_sweep("U"))
-            except Exception as e:
-                print("ERROR: sandbox setup failed for Test 5 UE sweep: %s"
-                      % e, file=sys.stderr)
-                sweep_outcomes["U"] = False
-                if tracker:
-                    tracker.finish("5U", False)
-                return
-            sandboxes["5U"] = sb5u
-            shutil.copy2(ue_routes, os.path.join(sb5u, "ue_routes.csv"))
-            log("Test 5: starting UE sweep (5U) -- ue_routes.csv ready")
-            _f5u = ex.submit(
-                run_sweep, "U", sb5u, tracker, args.seed,
-                os.path.join(sb5u, "ue_routes.csv"), args.network,
-                args.engine)
-            futures[_f5u] = ("sweep", "5U")
-            log("Test 5: 5U sweep submitted to executor")
-
-        def _maybe_run_test6():
-            """Run Test 6 if all selected Tests 1-4 are done+collected."""
-            nonlocal test6_done
-            if test6_done or 6 not in tests:
-                return
-            if not tests_14:
-                return
-            if not all(outcomes.get(t) for t in tests_14):
-                return
-            test6_done = True
-            try:
-                ok6, dt6 = run_test6(results_root, tracker)
-                outcomes[6] = ok6
-            except RuntimeError as e:
-                log("Test 6: %s" % e)
-                outcomes[6] = False
-            except Exception as e:  # pragma: no cover - defensive
-                log("Test 6: unexpected error: %s" % e)
-                outcomes[6] = False
-
-        def _collect_now(kind, key):
+        def _collect_now(key):
             """Collect results immediately for a finished job.
 
             Returns True on success; False if collection itself failed
             (which marks the job as failed). Never hangs: pure file
             copies with per-call exception handling.
             """
-            if kind == "test":
-                t = key
-                sandbox = sandboxes[t]
-                label = "Test %d" % t
-                try:
-                    if t == 1:
-                        collect_1(sandbox, results_root)
-                    else:
-                        collect_234(t, sandbox, results_root)
-                except Exception as e:
-                    print("ERROR: result collection failed for test %d: %s"
-                          % (t, e), file=sys.stderr)
-                    return False
-            else:  # sweep 5P or 5U
-                sub = "U" if key == "5U" else "P"
-                sandbox = sandboxes[key]
-                label = "Test 5 (%s sweep)" % ("UE" if sub == "U" else "proposed")
-                try:
-                    collect_5(sub, sandbox, results_root)
-                except Exception as e:
-                    print("ERROR: result collection failed for Test 5 "
-                          "%s sweep: %s" % (sub, e), file=sys.stderr)
-                    return False
+            job = jobs[key]
+            sandbox = sandboxes[key]
+            try:
+                if job["collect"] == "proposed":
+                    collect_proposed(job, sandbox, results_root, args.seed)
+                elif job["collect"] == "scenario":
+                    collect_scenario(job, sandbox, results_root, args.seed)
+                else:  # sweep
+                    collect_sweep(job, job["sub"], sandbox, results_root,
+                                  args.seed)
+            except Exception as e:
+                print("ERROR: result collection failed for %s: %s"
+                      % (key, e), file=sys.stderr)
+                return False
             if not args.keep_temp:
                 try:
                     shutil.rmtree(sandbox)
@@ -2276,42 +2726,84 @@ def main(argv=None):
                     log("WARNING: could not remove sandbox %s: %s"
                         % (sandbox, e))
                 else:
-                    log("%s: sandbox removed" % label)
+                    log("%s: sandbox removed" % job["label"])
             else:
-                log("%s: sandbox kept (--keep-temp): %s" % (label, sandbox))
+                log("%s: sandbox kept (--keep-temp): %s"
+                    % (job["label"], sandbox))
             return True
 
-        # Overall deadline for Phase A. Test 5's two sweeps are the long
-        # pole (~45 min each, in parallel); 18h is generous but guarantees
-        # the process ALWAYS reaches the summary instead of hanging
-        # silently at 100%.
-        _PHASE_A_TIMEOUT_S = 18 * 3600
-        _POLL_INTERVAL_S = 10.0
+        def _maybe_start_sweep(key):
+            """Start a pending UE-guidance sweep whose dependency UE job
+            has been collected. Returns True if the sweep was submitted
+            (or failed loudly and was marked as such)."""
+            job = pending.pop(key, None)
+            if job is None:
+                return False
+            dep_key = job["depends_on"]
+            if not outcomes.get(dep_key):
+                log("%s: dependency %s failed -- sweep cannot run"
+                    % (key, dep_key))
+                outcomes[key] = False
+                if tracker:
+                    tracker.finish(key, False)
+                return True
+            dep_job = jobs[dep_key]
+            ue_routes = os.path.join(dep_job["out_dir"], "ue_routes.csv")
+            if not os.path.isfile(ue_routes):
+                log("%s: dependency %s succeeded but %s is missing -- "
+                    "sweep cannot run" % (key, dep_key, ue_routes))
+                outcomes[key] = False
+                if tracker:
+                    tracker.finish(key, False)
+                return True
+            try:
+                sb = setup_sandbox(job["sandbox_name"], data_dir,
+                                   temp_root, job["scripts"],
+                                   sample_csv=samples[job["level"]])
+            except Exception as e:
+                print("ERROR: sandbox setup failed for %s: %s"
+                      % (key, e), file=sys.stderr)
+                outcomes[key] = False
+                if tracker:
+                    tracker.finish(key, False)
+                return True
+            sandboxes[key] = sb
+            shutil.copy2(ue_routes, os.path.join(sb, "ue_routes.csv"))
+            log("%s: starting -- ue_routes.csv ready" % key)
+            fut = ex.submit(run_job, job, sb, tracker, args)
+            futures[fut] = key
+            return True
+
+        def _maybe_run_test4():
+            """Run Test 4 as soon as Test 1's four jobs are collected,
+            without waiting for the sweeps to finish."""
+            nonlocal test4_done, test4_ok
+            if test4_done or 4 not in tests:
+                return
+            t1_keys = [k for k in jobs if jobs[k]["test"] == 1
+                       and k not in extra]
+            if not t1_keys:
+                return
+            if not all(outcomes.get(k) for k in t1_keys):
+                return
+            test4_done = True
+            try:
+                ok4, _dt4 = run_test4(results_root, args.seed, tracker)
+                test4_ok = ok4
+            except RuntimeError as e:
+                log("Test 4: %s" % e)
+                test4_ok = False
+            except Exception as e:  # pragma: no cover - defensive
+                log("Test 4: unexpected error: %s" % e)
+                test4_ok = False
 
         with concurrent.futures.ThreadPoolExecutor(
                 max_workers=max_workers) as ex:
-            # Submit initial Phase A jobs.
-            for t in tests:
-                if t in (1, 2, 3, 4):
-                    fut = ex.submit(run_test, t, sandboxes[t], tracker,
-                                    args.seed, args.test1_mode, args.network,
-                                    args.gap_threshold, args.engine)
-                    futures[fut] = ("test", t)
-            if 5 in tests:
-                fut = ex.submit(run_sweep, "P", sandboxes["5P"], tracker,
-                                args.seed, None, args.network, args.engine)
-                futures[fut] = ("sweep", "5P")
-            # 5U sandbox was set up in Phase A setup (if ue_routes.csv
-            # was pre-resolved). Submit it here, into the shared dict.
-            if "5U" in sandboxes:
-                log("Test 5: submitting UE sweep (5U) to executor")
-                sweep_5u_started = True
-                _fut5u = ex.submit(
-                    run_sweep, "U", sandboxes["5U"], tracker, args.seed,
-                    os.path.join(sandboxes["5U"], "ue_routes.csv"),
-                    args.network, args.engine)
-                futures[_fut5u] = ("sweep", "5U")
-                log("Test 5: 5U sweep submitted to executor")
+            futures = {}
+            for key in list(sandboxes.keys()):
+                fut = ex.submit(run_job, jobs[key], sandboxes[key],
+                                tracker, args)
+                futures[fut] = key
 
             # Polling loop (replaces as_completed). as_completed() blocks
             # until a future completes; if a worker thread never releases
@@ -2322,11 +2814,11 @@ def main(argv=None):
             _processed_keys = set()
             while True:
                 # Process every completed-but-unprocessed future. New
-                # futures (5U via _maybe_start_5u) may be added to the
-                # dict while processing; list() snapshots the dict so
-                # the mutation is safe, and the new future is picked up
-                # on the next pass.
-                for fut, (kind, key) in list(futures.items()):
+                # futures (UE sweeps via _maybe_start_sweep) may be added
+                # to the dict while processing; list() snapshots the dict
+                # so the mutation is safe, and the new future is picked
+                # up on the next pass.
+                for fut, key in list(futures.items()):
                     if key in _processed_keys:
                         continue
                     if not fut.done():
@@ -2344,7 +2836,7 @@ def main(argv=None):
                     if ok:
                         # Collect immediately; a collection failure marks
                         # the job as failed (never hangs: file copies).
-                        if not _collect_now(kind, key):
+                        if not _collect_now(key):
                             ok = False
                         elif tracker:
                             tracker.update(key, None, "done (collected)")
@@ -2352,48 +2844,38 @@ def main(argv=None):
                         sb = sandboxes.get(key, "?")
                         print("%s FAILED -- sandbox kept for debugging: %s"
                               % (key, sb))
-                    if kind == "test":
-                        outcomes[key] = ok
-                        if key == 4:
-                            test4_completed = True
-                    elif key == "5P":
-                        sweep_outcomes["P"] = ok
-                    elif key == "5U":
-                        sweep_outcomes["U"] = ok
-                    # Test 6 triggers as soon as Tests 1-4 are collected,
-                    # without waiting for the 5P sweep to finish.
-                    _maybe_run_test6()
-                    # 5U starts as soon as Test 4's ue_routes.csv is ready
-                    # (may add a new future to the dict).
-                    _maybe_start_5u()
+                    outcomes[key] = ok
+                    # A collected UE job unblocks its sweep(s).
+                    for pkey in list(pending.keys()):
+                        if jobs[pkey].get("depends_on") == key:
+                            _maybe_start_sweep(pkey)
+                    # Test 4 triggers as soon as Test 1 is collected,
+                    # without waiting for the sweeps to finish.
+                    _maybe_run_test4()
 
                 # Done when every future currently in the dict has been
-                # processed. If _maybe_start_5u just added 5U, it is not
-                # in _processed_keys, so we loop again.
-                _all_keys = set(key for (kind, key) in futures.values())
-                if _all_keys and _all_keys <= _processed_keys:
+                # processed. If _maybe_start_sweep just added a sweep,
+                # it is not in _processed_keys, so we loop again.
+                _all_keys = set(futures.values())
+                if _all_keys and _all_keys <= _processed_keys \
+                        and not pending:
                     break
 
                 # Hard deadline: never hang silently at 100%.
                 if time.monotonic() > _deadline:
                     _stuck = sorted(
-                        str(key) for (kind, key) in futures.values()
+                        str(key) for key in futures.values()
                         if key not in _processed_keys)
                     log("ERROR: Phase A timed out after %s; stuck jobs: %s"
                         % (fmt_min(_PHASE_A_TIMEOUT_S), _stuck))
                     print("ERROR: Phase A timed out; stuck jobs: %s"
                           % _stuck, file=sys.stderr)
-                    for (kind, key) in futures.values():
+                    for key in futures.values():
                         if key in _processed_keys:
                             continue
                         if tracker:
                             tracker.finish(key, False)
-                        if kind == "test":
-                            outcomes[key] = False
-                        elif key == "5P":
-                            sweep_outcomes["P"] = False
-                        elif key == "5U":
-                            sweep_outcomes["U"] = False
+                        outcomes[key] = False
                     # Don't let the `with` block's shutdown(wait=True)
                     # hang on stuck workers.
                     ex.shutdown(wait=False, cancel_futures=True)
@@ -2402,59 +2884,67 @@ def main(argv=None):
                 time.sleep(_POLL_INTERVAL_S)
     else:
         log("Phase A: no jobs to run")
-        test6_done = False
 
-    # Test 6 fallback: if it wasn't triggered inside the loop (e.g. no
-    # Phase A jobs ran, or Tests 1-4 were not all selected), try it now
-    # against whatever results exist.
-    if 6 in tests and not (n_jobs and test6_done):
+    # Any pending sweep whose dependency never completed (e.g. the
+    # dependency job itself failed) is marked failed here if
+    # _maybe_start_sweep was never reached for it.
+    for pkey in list(pending.keys()):
+        if not outcomes.get(pkey):
+            log("%s: dependency %s did not complete -- sweep cannot run"
+                % (pkey, jobs[pkey].get("depends_on")))
+            outcomes[pkey] = False
+            if tracker:
+                tracker.finish(pkey, False)
+
+    # Test 4 fallback: if it wasn't triggered inside the loop (e.g. Test 1
+    # was not selected and existing results are used), try it now.
+    if 4 in tests and not test4_done:
         try:
-            ok6, dt6 = run_test6(results_root, tracker)
-            outcomes[6] = ok6
+            ok4, _dt4 = run_test4(results_root, args.seed, tracker)
+            test4_ok = ok4
         except RuntimeError as e:
-            log("Test 6: %s" % e)
-            outcomes[6] = False
+            log("Test 4: %s" % e)
+            test4_ok = False
         except Exception as e:  # pragma: no cover - defensive
-            log("Test 6: unexpected error: %s" % e)
-            outcomes[6] = False
+            log("Test 4: unexpected error: %s" % e)
+            test4_ok = False
+        test4_done = True
 
-    # ---- Test 5 aggregation (barrier on collected sweep OUTPUTS) ----
+    # ---- Test 2 aggregation (barrier on collected sweep OUTPUTS) ----
     # Filesystem-based: verifies the per-bigloop dirs actually exist under
-    # results/test5/, instead of trusting the in-memory sweep_outcomes
-    # dict. A sweep that "succeeded" but collected nothing fails the
-    # barrier loudly with a clear message naming the missing sweep.
-    if 5 in tests:
+    # results/test2/, instead of trusting the in-memory outcomes dict.
+    if 2 in tests:
         if args.skip_aggregation:
-            log("Test 5: aggregation skipped (--skip-aggregation)")
+            log("Test 2: aggregation skipped (--skip-aggregation)")
             agg_status = "skipped"
             if tracker:
-                tracker.finish("5A", True, "skipped")
+                tracker.finish("t2-agg", True, "skipped")
         else:
             _p_dirs = sorted(glob.glob(os.path.join(
-                results_root, "test5", "proposed_sweep", "bigloop_*")))
+                results_root, "test2", "proposed_sweep", "bigloop_*")))
             _u_dirs = sorted(glob.glob(os.path.join(
-                results_root, "test5", "ue_sweep", "bigloop_*")))
+                results_root, "test2", "ue_sweep", "bigloop_*")))
             if not _p_dirs:
                 print("ERROR: Cannot aggregate: "
-                      "results/test5/proposed_sweep/ has no bigloop outputs "
-                      "(5P sweep failed or was not collected)",
+                      "results/test2/proposed_sweep/ has no bigloop outputs "
+                      "(t2-P sweep failed or was not collected)",
                       file=sys.stderr)
-                log("Test 5: aggregation not run "
+                log("Test 2: aggregation not run "
                     "(proposed_sweep outputs missing)")
                 agg_status = "FAILED"
                 if tracker:
-                    tracker.finish("5A", False)
+                    tracker.finish("t2-agg", False)
             elif not _u_dirs:
                 print("ERROR: Cannot aggregate: "
-                      "results/test5/ue_sweep/ has no bigloop outputs "
-                      "(5U sweep failed or was not collected)",
+                      "results/test2/ue_sweep/ has no bigloop outputs "
+                      "(t2-U sweep failed or was not collected)",
                       file=sys.stderr)
-                log("Test 5: aggregation not run (ue_sweep outputs missing)")
+                log("Test 2: aggregation not run (ue_sweep outputs missing)")
                 agg_status = "FAILED"
                 if tracker:
-                    tracker.finish("5A", False)
+                    tracker.finish("t2-agg", False)
             else:
-                log("Test 5: aggregating %d proposed + %d UE bigloops ..."
+                log("Test 2: aggregating %d proposed + %d UE bigloops ..."
                     % (len(_p_dirs), len(_u_dirs)))
                 try:
                     ok_agg, _ = run_aggregation(results_root, args.seed,
@@ -2464,39 +2954,43 @@ def main(argv=None):
                     print("ERROR: %s" % e, file=sys.stderr)
                     agg_status = "FAILED"
                     if tracker:
-                        tracker.finish("5A", False)
+                        tracker.finish("t2-agg", False)
 
     # ---- Summary (display stays live until here) ----
     if display_thread:
         stop_event.set()
         display_thread.join(timeout=10)
 
-    # ---- Table 4 emissions (Tests 1-4) ----
-    # Collected-results only (no sandbox, no engine): runs once,
-    # after every collection and after Test 5 aggregation, so a
-    # full run always produces it. Partial runs write the rows
-    # whose source files exist and note the rest as missing.
-    if any(t in tests for t in (1, 2, 3, 4)):
-        try:
-            run_table4_emissions(results_root)
-        except Exception as e:
-            log("WARNING: Table 4 emissions failed: %s "
-                "(other results unaffected)" % e)
-    print_summary(results_root, tests, outcomes, sweep_outcomes, agg_status)
+    # Per-test outcomes for the manifest and the exit code. A test is OK
+    # only when all of its jobs succeeded (Test 2 additionally needs the
+    # aggregation to be ok or skipped; Test 4 is the run_test4 outcome).
+    test_outcomes = {}
+    for t in tests:
+        if t == 2:
+            test_outcomes[2] = bool(outcomes.get("t2-P")
+                                    and outcomes.get("t2-U")
+                                    and agg_status in ("ok", "skipped"))
+        elif t == 4:
+            test_outcomes[4] = test4_ok
+        else:
+            tkeys = [k for k in jobs
+                     if jobs[k]["test"] == t and k not in extra]
+            test_outcomes[t] = bool(tkeys) and all(
+                outcomes.get(k) for k in tkeys)
+    # Manifest wants the sweep outcomes under their job keys too.
+    manifest_outcomes = dict(test_outcomes)
+    manifest_outcomes["t2-P"] = outcomes.get("t2-P", False)
+    manifest_outcomes["t2-U"] = outcomes.get("t2-U", False)
+
+    print_summary(results_root, tests, manifest_outcomes, agg_status)
     log("All done (%s total)" % fmt_min(time.time() - t_start))
 
-    failed = []
-    for t in tests:
-        if t == 5:
-            if not (sweep_outcomes["P"] and sweep_outcomes["U"]
-                    and agg_status in ("ok", "skipped")):
-                failed.append(t)
-        elif not outcomes.get(t):
-            failed.append(t)
+    failed = [t for t in tests if not test_outcomes.get(t)]
     _run_status = "failed" if failed else "completed"
     write_run_manifest(results_root, args, tests, data_dir, _run_status,
-                       outcomes, sweep_outcomes, agg_status,
-                       _run_started, time.time(), _run_cmdline)
+                       manifest_outcomes, agg_status,
+                       _run_started, time.time(), _run_cmdline,
+                       pool_file, levels, sample_counts)
     if failed:
         print("FAILED tests: %s" % failed, file=sys.stderr)
         sys.exit(1)

@@ -56,6 +56,46 @@ def parse_bigloops(spec):
     return seen
 
 
+
+def mpr_points_schedule(points):
+    """Build a (bigloop, p, p_fix, p_realtime) schedule for arbitrary MPR
+    points (percentages, e.g. [33, 66]).
+
+    The bigloop index IS the MPR point, so result files are prefixed with
+    it (33UOinfor_agent.csv, ...) and stay self-describing. The p
+    schedule is the existing one: point 0 is special (p=0.001,
+    p_fix=0.6, p_realtime=0.4, absolute shares); any other point uses
+    p=point/100 with the non-member share split 60/40 fix/realtime.
+    """
+    schedule = []
+    for point in points:
+        if point < 0 or point > 100:
+            raise ValueError(
+                "--mpr-points value %d out of range 0-100" % point)
+        if point == 0:
+            schedule.append((0, 0.001, 0.6, 0.4))
+        else:
+            p = point / 100.0
+            schedule.append((point, p, (1 - p) * 0.6, (1 - p) * 0.4))
+    return schedule
+
+
+def parse_mpr_points(spec):
+    """Parse an MPR-points spec into a sorted list of ints.
+
+    Accepts comma-separated percentages, e.g. "33,66" -> [33, 66].
+    """
+    out = []
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        out.append(int(part))
+    seen = sorted(set(out))
+    if not seen:
+        raise ValueError("empty --mpr-points selection")
+    return seen
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run all MSA iterations in parallel sandboxes."
@@ -79,7 +119,17 @@ def main():
     parser.add_argument(
         "--bigloops", default="0-10",
         help="Bigloops to run: e.g. '10' (Test 1, 100%% MPR only), "
-             "'0-10' (full MPR sweep, Test 5), '5,10'. Default: '0-10'.",
+             "'0-10' (full MPR sweep, Test 2), '5,10'. Default: '0-10'. "
+             "Cannot be combined with --mpr-points.",
+    )
+    parser.add_argument(
+        "--mpr-points", default=None,
+        help="MPR points in percent to run instead of --bigloops, e.g. "
+             "'33,66' (Test 3 demand-level sweep). The bigloop index is "
+             "the MPR point itself, so result files are prefixed 33/66. "
+             "Point 0 uses the special p=0.001 schedule; other points "
+             "use p=point/100 with the non-member share split 60/40 "
+             "fix/realtime. Cannot be combined with --bigloops.",
     )
     parser.add_argument(
         "--network", default="siouxfalls", choices=["siouxfalls", "baltimore"],
@@ -91,30 +141,47 @@ def main():
     )
     args = parser.parse_args()
 
-    try:
-        wanted = parse_bigloops(args.bigloops)
-    except ValueError as e:
-        print("ERROR: %s" % e, file=sys.stderr)
-        sys.exit(2)
-
     # Run from the repo root so relative paths resolve, wherever the script
     # is launched from.
     repo_root = os.path.dirname(os.path.abspath(__file__))
     os.chdir(repo_root)
 
-    full_schedule = runner_schedule(args.iterations)
-    schedule = [s for s in full_schedule if s[0] in wanted]
-    missing = [b for b in wanted if b not in
-               {s[0] for s in full_schedule}]
-    if missing:
-        print("ERROR: --bigloops selected %s, but --iterations %d only "
-              "defines bigloops 0..%d" % (missing, args.iterations,
-                                          args.iterations - 1),
-              file=sys.stderr)
-        sys.exit(2)
-    print(f"Launching {len(schedule)} MSA iterations in parallel "
-          f"(bigloops={[s[0] for s in schedule]}, "
-          f"workers={args.workers or 'auto'}, seed={args.seed}).", flush=True)
+    if args.mpr_points is not None:
+        if any(t == "--bigloops" or t.startswith("--bigloops=")
+               for t in sys.argv[1:]):
+            print("ERROR: --mpr-points cannot be combined with --bigloops",
+                  file=sys.stderr)
+            sys.exit(2)
+        try:
+            points = parse_mpr_points(args.mpr_points)
+            schedule = mpr_points_schedule(points)
+        except ValueError as e:
+            print("ERROR: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        print(f"Launching {len(schedule)} MSA iterations in parallel "
+              f"(mpr_points={[s[0] for s in schedule]}, "
+              f"workers={args.workers or 'auto'}, seed={args.seed}).",
+              flush=True)
+    else:
+        try:
+            wanted = parse_bigloops(args.bigloops)
+        except ValueError as e:
+            print("ERROR: %s" % e, file=sys.stderr)
+            sys.exit(2)
+        full_schedule = runner_schedule(args.iterations)
+        schedule = [s for s in full_schedule if s[0] in wanted]
+        missing = [b for b in wanted if b not in
+                   {s[0] for s in full_schedule}]
+        if missing:
+            print("ERROR: --bigloops selected %s, but --iterations %d only "
+                  "defines bigloops 0..%d" % (missing, args.iterations,
+                                              args.iterations - 1),
+                  file=sys.stderr)
+            sys.exit(2)
+        print(f"Launching {len(schedule)} MSA iterations in parallel "
+              f"(bigloops={[s[0] for s in schedule]}, "
+              f"workers={args.workers or 'auto'}, seed={args.seed}).",
+              flush=True)
 
     start = time.time()
     results = run_parallel_msa(

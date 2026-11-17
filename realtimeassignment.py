@@ -318,7 +318,10 @@ def comrealtimeassignment(
         agent_id = int(agent_id_all[s_row])
 
         # Non-realtime agents keep the pre-filled assignment above.
-        if agent_id not in realtime_set:
+        # realtime_set holds dividerand ROW POSITIONS, not agent IDs,
+        # so test membership by file row (s_row), as the pre-fill
+        # above already does.
+        if s_row not in realtime_set:
             continue
 
         matches = np.where(
@@ -452,7 +455,9 @@ def realtimeassignment_fast(
         Assignment period length in minutes.
 
     realtime_user : array-like
-        Agent IDs belonging to the realtime-information group.
+        Row positions (dividerand output) of the agents in the
+        realtime-information group -- NOT agent IDs. Agent IDs are
+        sparse under sampling, so membership must be tested by row.
 
     nchoice : array-like
         Existing route choices for non-realtime agents.
@@ -900,18 +905,25 @@ def realtimeassignment_fast(
 
     # Give every agent its existing assignment first.
     # Realtime agents will be updated only when a valid better route exists.
+    # Pre-fill by FILE ROW, not by agent_id: nchoice/rposition are
+    # row-indexed, but agent IDs are sparse under sampling (sampled
+    # from a ~200k pool), so agent_id indexing silently mis-assigned
+    # agents with ID < dsize and left (-1, -1) for the rest. The
+    # agent_id_to_row dict above maps each agent to its file row.
     for period_row, agent_record in enumerate(p_agent):
         agent_id = int(agent_record[0])
+        agent_row = agent_id_to_row.get(agent_id)
 
         if (
-            0 <= agent_id < nchoice_array.size
-            and 0 <= agent_id < rposition_array.size
+            agent_row is not None
+            and 0 <= agent_row < nchoice_array.size
+            and 0 <= agent_row < rposition_array.size
         ):
             rtchoice[period_row] = int(
-                nchoice_array[agent_id]
+                nchoice_array[agent_row]
             )
             updaterposition[period_row] = int(
-                rposition_array[agent_id]
+                rposition_array[agent_row]
             )
 
     # ---------------------------------------------------------
@@ -930,14 +942,18 @@ def realtimeassignment_fast(
     for period_row, agent_record in enumerate(p_agent):
         agent_id = int(agent_record[0])
 
-        # Non-realtime agents already carry their existing assignment
-        # from the pre-fill above; only realtime agents are updated.
-        if agent_id not in realtime_set:
-            continue
-
         agent_row = agent_id_to_row.get(agent_id)
 
         if agent_row is None:
+            continue
+
+        # Non-realtime agents already carry their existing assignment
+        # from the pre-fill above; only realtime agents are updated.
+        # realtime_set holds dividerand ROW POSITIONS, not agent IDs,
+        # so test membership by row (agent_id testing silently ran
+        # the tournament only for agents whose ID happened to be a
+        # realtime position).
+        if agent_row not in realtime_set:
             continue
 
         origin = int(agent_od_values[agent_row, 0])
